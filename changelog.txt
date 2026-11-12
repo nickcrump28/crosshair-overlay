@@ -1,0 +1,60 @@
+v1.17  Layers & smarter crosshair
+Crosshair layers: stack a second shape on top, with its own color and size (Main / Layer 2 switch)
+Auto-contrast: turns white or black when your color would blend into the map (Color tab)
+Hides itself while Roblox's Esc menu or the chat box is open (Effects tab)
+Export / import all your settings and profiles to move them to another PC (Profiles tab)
+Copy debug info: one click copies your version and setup to paste in Discord (Updates tab)
+Fixed: small spaced-out labels like "PANEL SIZE" were cut off
+
+v1.16  Clearer bug reports
+Crash reports explain in plain words what crashed, why, and what you were doing just before
+Report a problem is quicker: pick what's wrong, how often and what you were doing — typing is optional
+Press F1 in the settings panel (or search "report") to report a problem
+You get a reference code after sending a report, to quote if you talk to simplysoul
+Fixed: the crosshair lagged behind / didn't line up with the mouse in 1.16.1 and 1.16.2 (back to how 1.15.1 followed the mouse)
+Every crosshair is centered exactly on the mouse at every thickness (thin lines on Cross-Dot and Shotgun Spread too)
+Fine-tune position: nudge the crosshair a pixel at a time (Look tab)
+
+v1.15  Search, tips & tour
+Search settings: Ctrl+F (or just start typing) and jump straight to any setting
+Hover over a setting for a moment to see what it does
+The panel opens on the tab you used last
+New players get a quick 3-step tour the first time they open the app
+Cleaner version history in this tab
+
+v1.14  Clearer reports & tester tools
+Bug reports say what happened (app crash, update undone, Roblox crash) with a one-line reason
+Share anonymous usage stats if you want to (off unless you turn it on, General tab)
+Q/A testers: tester badge, "Looks good" / "Problem..." buttons and a switch to pause test builds
+
+v1.13  New look
+Redesigned settings window: tabs along the top, live preview always on the left
+5 new animated themes: Aurora, Galaxy, Ember, Deep Sea and Sakura, plus better background art
+Share codes: send your crosshair to friends, and Recent codes to switch back to theirs
+Show the crosshair only while Roblox is in front (General tab)
+Announcements from simplysoul show up in the app
+Smaller window, with - and + buttons to pick your size
+Fixed: updates could undo themselves if you closed the app quickly after updating
+
+v1.12  Safer updates
+If an update has a problem on your PC, the app goes back to the previous version by itself
+What's new window after each update, and an Updates tab with everything that changed
+Start with Windows, and Remove everything for a clean uninstall
+Settings window fits smaller laptop screens
+FPS Boost asks before it first changes Roblox's settings
+
+v1.11  Auto-updates
+The app updates itself
+Crosshair hidden from recordings, clips, streams and screenshots (Effects tab)
+Roblox crash reports with the likely cause and how to fix it
+Fixed Roblox getting stuck on a white screen (FPS Boost)
+
+v1.10  FPS Boost
+FPS Boost tab: Roblox FPS cap, performance boost and high-performance GPU
+Bug reports and Report a problem
+New app icon
+
+v1.9  Themes
+Themes for the panel and loading screen
+New crosshair shapes and roleplay sights
+Animated loading screen and loading music

@@ -1,0 +1,5 @@
+Crosshair layers: stack a second shape on top with its own color and size
+Auto-contrast: turns white or black when your color would blend in
+Hides itself while Roblox's Esc menu or chat is open
+Export / import all your settings to another PC
+Copy debug info for Discord in one click

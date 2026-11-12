@@ -1,0 +1,42 @@
+#include <winver.h>
+#include "version.h"
+1 ICON "app.ico"
+1 24 "app.manifest"
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION VER_MAJOR,VER_MINOR,VER_PATCH,0
+PRODUCTVERSION VER_MAJOR,VER_MINOR,VER_PATCH,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "simplysoul"
+      VALUE "FileDescription", "Crosshair Overlay by simplysoul"
+      VALUE "FileVersion", VER_STR
+      VALUE "InternalName", "CrosshairOverlay"
+      VALUE "LegalCopyright", "Copyright (C) 2026 simplysoul"
+      VALUE "OriginalFilename", "CrosshairOverlay-v" VER_STR ".exe"
+      VALUE "ProductName", "Crosshair Overlay"
+      VALUE "ProductVersion", VER_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+10 RCDATA "cc_bg.jpg"
+11 RCDATA "drive_bg.jpg"
+12 RCDATA "release-notes.txt"
+13 RCDATA "changelog.txt"
+#ifndef PUBLISHER_APP
+15 RCDATA "symbols.bin" /* function names, for readable crash reports (make-symbols.py) */
+#endif
+#ifdef PUBLISHER_APP
+14 RCDATA "source-bundle.bin"
+#endif
