@@ -1,3 +1,7 @@
+v1.18  Faster fixes
+Behind the scenes: simplysoul now sees crashes and reports for each version at a glance, so a bad update gets spotted and fixed sooner
+Nothing changes for you — the crash reports you already send are what it counts
+
 v1.17  Layers & smarter crosshair
 Crosshair layers: stack a second shape on top, with its own color and size (Main / Layer 2 switch)
 Auto-contrast: turns white or black when your color would blend into the map (Color tab)
@@ -5,6 +9,7 @@ Hides itself while Roblox's Esc menu or the chat box is open (Effects tab)
 Export / import all your settings and profiles to move them to another PC (Profiles tab)
 Copy debug info: one click copies your version and setup to paste in Discord (Updates tab)
 Fixed: small spaced-out labels like "PANEL SIZE" were cut off
+Fixed: the crosshair lagged behind the mouse (about 3x faster tracking now)
 
 v1.16  Clearer bug reports
 Crash reports explain in plain words what crashed, why, and what you were doing just before

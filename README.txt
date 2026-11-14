@@ -1,4 +1,31 @@
-Crosshair Overlay v1.17.0 - by simplysoul
+Crosshair Overlay v1.17.1 - by simplysoul
+
+NEW IN 1.18.0 - Publisher: Health (crash dashboard)
+  The publisher has a new "Health" button. It reads your bug-report Discord channel
+  and shows, for each version: players (from usage stats), crashes, errors, updates
+  undone, problem reports, Roblox crashes and tester "looks good" - plus the most
+  common crash reason. Red = 2+ PCs crashed or an update was undone.
+
+  One-time setup (needs a Discord bot that can READ the report channel; webhooks
+  can only post):
+    1. discord.com/developers/applications -> New Application ("Crosshair Health").
+    2. Bot -> Reset Token -> copy it. Turn on "Message Content Intent" on that page.
+    3. OAuth2 -> URL Generator: tick "bot", then "View Channels" and
+       "Read Message History". Open the generated link and add it to your server.
+    4. Discord Settings -> Advanced -> Developer Mode on. Right-click the bug-report
+       channel -> Copy Channel ID.
+    5. Publisher -> Health -> paste the token and channel ID -> Save & load.
+  The bot token is stored DPAPI-encrypted on your PC only (like the GitHub token)
+  and is never put in the exe, the source bundle or GitHub. It reads the last
+  1000 messages. If the token ever leaks: Bot -> Reset Token, then Change bot.
+
+NEW IN 1.17.1 - Hotfix: tracking lag
+- The crosshair window was owned by the main thread, and every mouse move was a queued (async) request to it.
+  1.17.0's menu/contrast watcher sampled the screen 30x a second on that same thread, so moves waited in line.
+  Now the mouse-follow thread creates and owns the crosshair window (moves are applied instantly, it checks the
+  mouse twice per screen refresh) and the menu/contrast watcher runs on its own background thread and only posts
+  its decisions. Measured in a test with the panel open + effects on: 21 ms -> 7 ms typical, 45 ms -> 12 ms worst.
+- Fixed a timing slip in Esc-menu detection (the "before" brightness is always from before the key press).
 
 NEW IN 1.17.0 - Layers, auto-contrast, menu/chat hiding, backups, debug info, publisher history
 - Crosshair layers: the Crosshair, Color and Look tabs have a Main / Layer 2 switch next to the heading. In

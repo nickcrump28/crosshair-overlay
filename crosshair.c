@@ -217,16 +217,18 @@ static int has_arg(const wchar_t *a) {
    but it still shows on your screen. Older Windows would show a black box instead, so there
    it's simply not used. */
 static HWND g_card;
-static int capture_hide_apply(void) {
+#define WM_OV_AFFINITY (WM_APP + 60) /* asks the crosshair's own thread to set its capture setting */
+static int set_affinity(HWND h, DWORD a) {
     typedef BOOL(WINAPI * SetAffinityFn)(HWND, DWORD);
     static SetAffinityFn f;
     static int looked;
     if (!looked) { looked = 1; f = (SetAffinityFn)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetWindowDisplayAffinity"); }
-    if (!f) return 0;
+    return f && h && f(h, a);
+}
+static int capture_hide_apply(void) {
     DWORD a = g_nocap ? 0x11 /* WDA_EXCLUDEFROMCAPTURE */ : 0 /* WDA_NONE */;
-    int ok = 1;
-    if (g_overlay && !f(g_overlay, a)) ok = 0;
-    if (g_card) f(g_card, a);
+    int ok = g_overlay ? (int)SendMessageW(g_overlay, WM_OV_AFFINITY, a, 0) : 0;
+    if (g_card) set_affinity(g_card, a);
     return ok;
 }
 
@@ -1637,6 +1639,7 @@ static int secret_save(const wchar_t *name, const char *val) {
 }
 #define SECRET_HOOK L"release-webhook.dat"
 #define SECRET_GH L"github-token.dat"
+#define SECRET_BOT L"discord-bot.dat" /* Health: a Discord bot that can read the report channel */
 static int publisher_here(void) { wchar_t p[MAX_PATH]; pub_path(SECRET_HOOK, p); return p[0] && file_exists(p); }
 
 /* Version and built-in notes of any Crosshair Overlay exe (notes = resource 12, from v1.11.0 on). */
@@ -4060,7 +4063,6 @@ static void CALLBACK focus_event(HWINEVENTHOOK hk, DWORD ev, HWND w, LONG obj, L
 /* ---- scene watcher (30 times a second, only while Auto-contrast or "Hide in Roblox menus & chat" is on) ----
    It looks at a few small spots of the screen. Layered windows (like the crosshair) aren't in that picture,
    so it sees the game behind the crosshair. Nothing is saved or sent anywhere. */
-#define SCENE_TIMER 13
 static float srgb_lin(int c) { float v = c / 255.0f; return v <= 0.04045f ? v / 12.92f : powf((v + 0.055f) / 1.055f, 2.4f); }
 static float lum_rgb(int r, int g, int b) { return 0.2126f * srgb_lin(r) + 0.7152f * srgb_lin(g) + 0.0722f * srgb_lin(b); }
 static float contrast_ratio(float a, float b) { return (fmaxf(a, b) + 0.05f) / (fminf(a, b) + 0.05f); }
@@ -4096,12 +4098,18 @@ static int screen_patches(const POINT *pt, int n, int half, int *R, int *G, int 
     ReleaseDC(NULL, sdc);
     return ok;
 }
+#define WM_SCENE (WM_APP + 61) /* from the scene thread: wp = hide (0/1), lp = auto-contrast color (0/1/2) */
 static void scene_apply(int hide) {
     if (hide == g_scene_hidden) return;
     g_scene_hidden = hide;
     log_info(hide ? L"Roblox menu / chat open: crosshair hidden" : L"Roblox menu / chat closed: crosshair back");
     if (!g_keydlg && !g_menu_open) ShowWindow(g_overlay, !S.hidden && !g_focus_hidden && !hide ? SW_SHOWNOACTIVATE : SW_HIDE);
     sync_cursor();
+}
+static volatile LONG g_sc_hide, g_sc_alt;
+static void scene_post(int hide, int alt) { /* tell the main thread only when something changed */
+    if ((InterlockedExchange(&g_sc_hide, hide) != hide) | (InterlockedExchange(&g_sc_alt, alt) != alt))
+        if (g_host) PostMessageW(g_host, WM_SCENE, hide, alt);
 }
 static void scene_tick(void) {
     static int tick, chat, menu, pend, was[4];
@@ -4123,6 +4131,7 @@ static void scene_tick(void) {
             edge[i] = (down && !was[i]) || ((k & 1) && !down); /* pressed since the last look (even a quick tap) */
             was[i] = down;
         }
+        float before = bright; /* measured on an earlier tick, so always from before this key press */
         if (tick % 3 == 0 || pend) { /* how bright Roblox's window is, away from the middle (where the menu panel sits) */
             POINT pts[8], o = {0, 0};
             static const float FX[8] = {0.12f, 0.5f, 0.88f, 0.12f, 0.5f, 0.88f, 0.06f, 0.94f}, FY[8] = {0.2f, 0.1f, 0.2f, 0.8f, 0.9f, 0.8f, 0.5f, 0.5f};
@@ -4130,15 +4139,13 @@ static void scene_tick(void) {
             for (int i = 0; i < 8; i++) { pts[i].x = o.x + (int)(rc.right * FX[i]); pts[i].y = o.y + (int)(rc.bottom * FY[i]); }
             int r, g, b;
             if (screen_patches(pts, 8, 5, &r, &g, &b)) {
-                float nb = lum_rgb(r, g, b);
-                if (!pend && !menu) b0 = nb; /* the "before" brightness */
-                bright = nb;
+                bright = lum_rgb(r, g, b);
             }
         }
         if (edge[0]) { /* Esc */
             if (chat) chat = 0;                 /* closes the chat box, not the menu */
             else if (menu) { menu = 0; pend = 0; }
-            else { pend = 1; pend_t = now; }    /* menu opening? confirmed below by the screen going darker */
+            else if (before >= 0) { pend = 1; pend_t = now; b0 = before; } /* menu opening? confirmed below by the screen going darker */
         }
         if (pend && !menu) {
             if (b0 > 0.012f && bright >= 0 && bright < b0 * 0.72f) { menu = 1; mb = bright; pend = 0; }
@@ -4147,17 +4154,16 @@ static void scene_tick(void) {
         if (menu && bright >= 0 && bright > mb * 1.3f + 0.01f) menu = 0; /* it got bright again: Resume was clicked */
         if (edge[1] && !menu) chat = 1;                       /* "/" opens Roblox's chat box */
         if (chat && (edge[2] || edge[3])) chat = 0;            /* Enter sends, a click leaves it */
-        scene_apply(chat || menu);
     } else {
         if (!rbx) chat = 0;
         if (!S.menu_hide) { chat = menu = pend = 0; }
-        scene_apply(0);
     }
+    int hide = S.menu_hide && rbx && (chat || menu), alt = g_sc_alt;
     /* --- auto-contrast: would the crosshair blend into what's behind it? --- */
-    if (S.auto_contrast && S.anim != 1 && !S.hidden && !g_scene_hidden && tick % 3 == 1) {
+    if (S.auto_contrast && S.anim != 1 && !S.hidden && !hide && tick % 3 == 1) {
         POINT c;
         target_point(&c);
-        int r, g, b, half = clampi(needed_size() / 2, 8, 28), alt = g_ac_alt;
+        int r, g, b, half = clampi((int)g_wsz / 2, 8, 28);
         if (screen_patches(&c, 1, half, &r, &g, &b)) {
             float bl = lum_rgb(r, g, b), cl = lum_rgb(COLORS[S.color].r, COLORS[S.color].g, COLORS[S.color].b);
             float cr = contrast_ratio(bl, cl);
@@ -4165,13 +4171,21 @@ static void scene_tick(void) {
             else if (alt && cr > 2.2f) alt = 0;
             else if (alt && ((alt == 1 && bl > 0.45f) || (alt == 2 && bl < 0.15f))) alt = bl > 0.3f ? 2 : 1;
         }
-        if (alt != g_ac_alt) { g_ac_alt = alt; if (!g_keydlg) redraw_overlay(); }
-    } else if (g_ac_alt && (!S.auto_contrast || S.anim == 1)) { g_ac_alt = 0; redraw_overlay(); }
+    } else if (!S.auto_contrast || S.anim == 1) alt = 0;
+    scene_post(hide, alt);
 }
-static void scene_timer_sync(void) {
-    if (!g_host) return;
-    if (S.auto_contrast || S.menu_hide) SetTimer(g_host, SCENE_TIMER, 33, NULL);
-    else { KillTimer(g_host, SCENE_TIMER); scene_apply(0); if (g_ac_alt) { g_ac_alt = 0; redraw_overlay(); } }
+/* its own thread: checks 30 times a second while one of the two options is on, otherwise just waits */
+static DWORD WINAPI scene_thread(LPVOID unused) {
+    (void)unused;
+    while (g_running) {
+        if (S.auto_contrast || S.menu_hide) { scene_tick(); Sleep(33); }
+        else { scene_post(0, 0); Sleep(250); }
+    }
+    return 0;
+}
+static void scene_timer_sync(void) { /* the scene thread picks up option changes by itself */
+    static int started;
+    if (!started && g_host) { HANDLE t = CreateThread(NULL, 0, scene_thread, NULL, 0, NULL); if (t) { SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(t); started = 1; } }
 }
 
 /* ---------------- keybinds ---------------- */
@@ -5732,13 +5746,14 @@ static void whatsnew_dialog(void) {
    and publishes it to GitHub (auto-updates) and Discord (release channel). */
 #define PD_W 640
 #define PD_H 700
-enum { PH_NONE = -1, PH_CHOOSE = 1, PH_CLOSE, PH_PUBLISH, PH_TESTERS, PH_NEWS, PH_CHAN0, PH_CHAN1, PH_PING, PH_HISTORY };
+enum { PH_NONE = -1, PH_CHOOSE = 1, PH_CLOSE, PH_PUBLISH, PH_TESTERS, PH_NEWS, PH_CHAN0, PH_CHAN1, PH_PING, PH_HISTORY, PH_HEALTH };
 static HWND g_pnotes, g_phook, g_ptok, g_powner;
 static int g_phov = PH_NONE, g_powner_cap, g_pdone, g_pwarn;
-static RECT g_pchoose, g_pclose, g_ppub, g_pnotesbox, g_phookbox, g_ptokbox, g_pexebox, g_ptesters, g_pnews, g_phist, g_pchan[2];
+static RECT g_pchoose, g_pclose, g_ppub, g_pnotesbox, g_phookbox, g_ptokbox, g_pexebox, g_ptesters, g_pnews, g_phist, g_phealth, g_pchan[2];
 static int g_pchan_sel; /* 0 everyone, 1 testers only */
 static void testers_dialog(void);
 static void history_dialog(void);
+static void health_dialog(void);
 static int g_tkind;
 static HWND g_tdlg;
 static void set_dpi_aware(void);
@@ -5760,6 +5775,7 @@ static void pd_layout(void) {
     SetRect(&g_ptesters, pad, dpx(PD_H - 64), pad + dpx(92), dpx(PD_H - 24));
     SetRect(&g_pnews, g_ptesters.right + dpx(8), dpx(PD_H - 64), g_ptesters.right + dpx(8) + dpx(130), dpx(PD_H - 24));
     SetRect(&g_phist, g_pnews.right + dpx(8), dpx(PD_H - 64), g_pnews.right + dpx(8) + dpx(84), dpx(PD_H - 24));
+    SetRect(&g_phealth, w - pad - dpx(112), dpx(20), w - pad, dpx(52)); /* top-right, next to the title */
     SetRect(&g_ppingr, pad, dpx(392), pad + dpx(330), dpx(416));
     SetRect(&g_ppub, w - pad - dpx(150), dpx(PD_H - 64), w - pad, dpx(PD_H - 24));
     SetRect(&g_pclose, g_ppub.left - dpx(8) - dpx(86), g_ppub.top, g_ppub.left - dpx(8), g_ppub.bottom);
@@ -5872,6 +5888,8 @@ static void pd_paint(HWND h) {
     rd_text(dc, g_ptesters.left, g_ptesters.top, g_ptesters.right, g_ptesters.bottom, L"Testers", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     rd_rrect(dc, &g_pnews, dpx(16), g_phov == PH_NEWS ? C_HOVER : C_CARD, C_BORDER);
     rd_text(dc, g_pnews.left, g_pnews.top, g_pnews.right, g_pnews.bottom, L"Announcement", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    rd_rrect(dc, &g_phealth, dpx(16), g_phov == PH_HEALTH ? C_HOVER : C_CARD, C_BORDER);
+    rd_text(dc, g_phealth.left, g_phealth.top, g_phealth.right, g_phealth.bottom, L"\x2665  Health", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     rd_rrect(dc, &g_phist, dpx(16), g_phov == PH_HISTORY ? C_HOVER : C_CARD, C_BORDER);
     rd_text(dc, g_phist.left, g_phist.top, g_phist.right, g_phist.bottom, L"History", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     rd_rrect(dc, &g_pclose, dpx(16), g_phov == PH_CLOSE ? C_HOVER : C_CARD, C_BORDER);
@@ -5895,6 +5913,7 @@ static int pd_hit(int x, int y) {
     if (PtInRect(&g_ptesters, p)) return PH_TESTERS;
     if (PtInRect(&g_pnews, p)) return PH_NEWS;
     if (PtInRect(&g_phist, p)) return PH_HISTORY;
+    if (PtInRect(&g_phealth, p)) return PH_HEALTH;
     if (PtInRect(&g_pchan[0], p)) return PH_CHAN0;
     if (PtInRect(&g_pchan[1], p)) return PH_CHAN1;
     if (PtInRect(&g_ppingr, p)) return PH_PING;
@@ -6053,6 +6072,7 @@ static LRESULT CALLBACK pd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (k == PH_TESTERS) { if (!g_tdlg) g_tkind = 0; testers_dialog(); }
         else if (k == PH_NEWS) { if (!g_tdlg) g_tkind = 1; testers_dialog(); }
         else if (k == PH_HISTORY) history_dialog();
+        else if (k == PH_HEALTH) health_dialog();
         else if (k == PH_PING && !g_pub_busy && !g_pchan_sel) {
             wchar_t ip[MAX_PATH];
             g_pping = !g_pping;
@@ -6678,6 +6698,388 @@ static void history_dialog(void) {
     InvalidateRect(g_hdlg, NULL, FALSE);
 }
 
+/* ---- Health: reads the bug-report channel with a Discord bot and counts, per version, how many players
+   crashed / hit errors / had an update undone / sent reports, and how many use it (usage stats). ---- */
+#define NHV 8
+#define NHID 96
+typedef struct {
+    char ver[16];
+    int n[7];             /* 0 crash, 1 error, 2 undone, 3 report, 4 roblox crash, 5 tester ok, 6 usage */
+    char pcs[7][NHID][9]; /* distinct install / user ids per kind */
+    int npc[7];
+    wchar_t reason[3][120]; int rcount[3];
+    char first[11];       /* newest message date for this version */
+} HealthVer;
+static HealthVer g_hver[NHV];
+static int g_nhv, g_hlth_msgs, g_hlhov = -1, g_hlsetup;
+static wchar_t g_hlstatus[300];
+static HWND g_hldlg, g_hltok, g_hlchan;
+static RECT g_hlsave, g_hlrefresh, g_hlchange, g_hlclose, g_hltokbox, g_hlchanbox;
+enum { HL_SAVE = 1, HL_REFRESH, HL_CHANGE, HL_CLOSE };
+static const char *discord_api(void) {
+#ifdef CH_TEST
+    static char t[200];
+    if (GetEnvironmentVariableA("CH_DISCORD_API", t, 200)) return t;
+#endif
+    return "https://discord.com/api/v10";
+}
+static int ver_cmp_s(const char *a, const char *b) {
+    int x[3] = {0}, y[3] = {0};
+    sscanf(a, "%d.%d.%d", &x[0], &x[1], &x[2]);
+    sscanf(b, "%d.%d.%d", &y[0], &y[1], &y[2]);
+    for (int i = 0; i < 3; i++) if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
+    return 0;
+}
+static void hv_add(const char *ver, int kind, const char *pc, const wchar_t *reason, const char *date) {
+    int i;
+    for (i = 0; i < g_nhv; i++) if (!strcmp(g_hver[i].ver, ver)) break;
+    if (i == g_nhv) {
+        if (g_nhv < NHV) g_nhv++;
+        else { /* keep the 8 newest versions */
+            int old = 0;
+            for (int k = 1; k < NHV; k++) if (ver_cmp_s(g_hver[k].ver, g_hver[old].ver) < 0) old = k;
+            if (ver_cmp_s(ver, g_hver[old].ver) < 0) return;
+            i = old;
+        }
+        memset(&g_hver[i], 0, sizeof(g_hver[i]));
+        lstrcpynA(g_hver[i].ver, ver, 16);
+    }
+    HealthVer *h = &g_hver[i];
+    h->n[kind]++;
+    if (date[0] && strcmp(date, h->first) > 0) lstrcpynA(h->first, date, 11);
+    if (pc && pc[0]) {
+        int k;
+        for (k = 0; k < h->npc[kind]; k++) if (!strcmp(h->pcs[kind][k], pc)) break;
+        if (k == h->npc[kind] && k < NHID) lstrcpynA(h->pcs[kind][h->npc[kind]++], pc, 9);
+    }
+    if (reason && reason[0] && kind == 0) { /* most common crash places */
+        int k, empty = -1;
+        for (k = 0; k < 3; k++) { if (!wcscmp(h->reason[k], reason)) { h->rcount[k]++; return; } if (!h->reason[k][0] && empty < 0) empty = k; }
+        if (empty >= 0) { lstrcpynW(h->reason[empty], reason, 120); h->rcount[empty] = 1; }
+    }
+}
+/* text right after `key` up to one of the stop characters */
+static void grab_after(const char *src, const char *key, const char *stops, char *out, int cap) {
+    const char *p = strstr(src, key);
+    int n = 0;
+    out[0] = 0;
+    if (!p) return;
+    p += strlen(key);
+    while (*p && !strchr(stops, *p) && n < cap - 1) out[n++] = *p++;
+    out[n] = 0;
+}
+static int health_load(void) {
+    char tok[200], chan[40], *js = NULL, before[40] = "";
+    wchar_t ip[MAX_PATH], wchan[40];
+    g_nhv = 0;
+    g_hlth_msgs = 0;
+    pub_path(L"publisher.ini", ip);
+    GetPrivateProfileStringW(L"publisher", L"report_channel", L"", wchan, 40, ip);
+    WideCharToMultiByte(CP_UTF8, 0, wchan, -1, chan, sizeof(chan), NULL, NULL);
+    if (!chan[0] || !secret_load(SECRET_BOT, tok, sizeof(tok))) { g_hlsetup = 1; wcscpy(g_hlstatus, L"Connect a Discord bot that can read your bug-report channel (one-time setup)."); return 0; }
+    wchar_t hdr[400];
+    { wchar_t wt[200]; MultiByteToWideChar(CP_UTF8, 0, tok, -1, wt, 200); wsprintfW(hdr, L"Authorization: Bot %s\r\n", wt); SecureZeroMemory(wt, sizeof(wt)); }
+    SecureZeroMemory(tok, sizeof(tok));
+    for (int page = 0; page < 10; page++) { /* up to 1000 messages, newest first */
+        wchar_t url[400];
+        wsprintfW(url, L"%S/channels/%S/messages?limit=100%S%S", discord_api(), chan, before[0] ? "&before=" : "", before);
+        int st = https_req(L"GET", url, hdr, NULL, 0, &js, NULL, 16 * 1024 * 1024);
+        if (st != 200 || !js) {
+            if (!page) {
+                if (st == 401) wcscpy(g_hlstatus, L"Discord said the bot token is wrong. Click Change bot and paste it again.");
+                else if (st == 403) wcscpy(g_hlstatus, L"The bot can't read that channel. Give it View Channel + Read Message History there.");
+                else if (st == 404) wcscpy(g_hlstatus, L"Discord can't find that channel. Check the channel ID (Change bot).");
+                else wsprintfW(g_hlstatus, L"Couldn't reach Discord (HTTP %d).", st);
+                SecureZeroMemory(hdr, sizeof(hdr));
+                free(js);
+                return 0;
+            }
+            free(js);
+            break;
+        }
+        int depth = 0, instr = 0, got = 0;
+        const char *start = NULL;
+        for (const char *c = js; *c; c++) {
+            if (instr) { if (*c == '\\' && c[1]) c++; else if (*c == '"') instr = 0; continue; }
+            if (*c == '"') { instr = 1; continue; }
+            if (*c == '{') { if (++depth == 1) start = c; }
+            else if (*c == '}' && --depth == 0 && start) {
+                const char *e = c + 1;
+                static char content[2400], desc[2400], foot[200], date[40];
+                content[0] = desc[0] = foot[0] = date[0] = 0;
+                jstr(jkey(start, e, "id"), before, sizeof(before)); /* the last one is the oldest: next page starts there */
+                jstr(jkey(start, e, "content"), content, sizeof(content));
+                jstr(jkey(start, e, "timestamp"), date, sizeof(date));
+                date[10] = 0;
+                const char *em = jkey(start, e, "embeds");
+                if (em) { jstr(jkey(em, e, "description"), desc, sizeof(desc)); const char *ft = jkey(em, e, "footer"); if (ft) jstr(jkey(ft, e, "text"), foot, sizeof(foot)); }
+                got++;
+                g_hlth_msgs++;
+                /* what kind */
+                int kind = -1;
+                if (strstr(content, "Crash (automatic)") || strstr(content, "App crash (automatic)")) kind = 0;
+                else if (strstr(content, "Update undone (automatic)")) kind = 2;
+                else if (strstr(content, "Error (automatic)")) kind = 1;
+                else if (strstr(content, "Roblox crash (automatic)")) kind = 4;
+                else if (strstr(content, "**Problem report**")) kind = 3;
+                else if (strstr(content, "Tester: looks good")) kind = 5;
+                else if (strstr(content, "**Usage**")) kind = 6;
+                if (kind < 0) { start = NULL; continue; }
+                /* which version: the first " v1.2.3" */
+                char ver[16] = "";
+                for (const char *q = content; (q = strstr(q, " v")); q++)
+                    if (q[2] >= '0' && q[2] <= '9') { int k = 0; q += 2; while ((isdigit((unsigned char)*q) || *q == '.') && k < 15) ver[k++] = *q++; ver[k] = 0; break; }
+                if (!ver[0]) { start = NULL; continue; }
+                /* which PC */
+                char pc[24] = "";
+                grab_after(foot, "install id ", " ", pc, sizeof(pc));
+                if (!pc[0]) grab_after(content, "id `", "`", pc, sizeof(pc));
+                if (!pc[0]) grab_after(content, "user `", "`", pc, sizeof(pc));
+                /* crash: where it crashed (first line of "What happened") */
+                wchar_t rw[120] = L"";
+                if (kind == 0) {
+                    char r[300];
+                    grab_after(desc, "**What happened**\n", "\n", r, sizeof(r));
+                    if (!r[0]) grab_after(content, "**What happened:** ", "\n", r, sizeof(r));
+                    MultiByteToWideChar(CP_UTF8, 0, r, -1, rw, 120);
+                    rw[119] = 0;
+                }
+                hv_add(ver, kind, pc, rw, date);
+                start = NULL;
+            }
+        }
+        free(js);
+        js = NULL;
+        if (got < 100) break;
+    }
+    SecureZeroMemory(hdr, sizeof(hdr));
+    /* newest version first */
+    for (int i = 0; i < g_nhv; i++)
+        for (int k = i + 1; k < g_nhv; k++)
+            if (ver_cmp_s(g_hver[k].ver, g_hver[i].ver) > 0) { HealthVer t = g_hver[i]; g_hver[i] = g_hver[k]; g_hver[k] = t; }
+    g_hlsetup = 0;
+    wsprintfW(g_hlstatus, L"Read the last %d messages in the report channel.%s", g_hlth_msgs, g_nhv ? L"" : L" No reports or usage lines in them yet.");
+    return 1;
+}
+static void hl_layout(void);
+static void hl_paint(HWND h) {
+    PAINTSTRUCT ps;
+    HDC wdc = BeginPaint(h, &ps);
+    RECT cr;
+    GetClientRect(h, &cr);
+    HDC dc = CreateCompatibleDC(wdc);
+    HBITMAP bm = CreateCompatibleBitmap(wdc, cr.right, cr.bottom);
+    HGDIOBJ obm = SelectObject(dc, bm);
+    HBRUSH bg = CreateSolidBrush(C_BG);
+    FillRect(dc, &cr, bg);
+    DeleteObject(bg);
+    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
+    SetBkMode(dc, TRANSPARENT);
+    int pad = dpx(26), w = cr.right;
+    rd_text(dc, pad, dpx(20), w - pad, dpx(52), L"Health", F_HEAD, C_TEXT, DT_LEFT | DT_SINGLELINE);
+    rd_text(dc, pad, dpx(54), w - pad, dpx(76), g_hlstatus, F_SMALL, C_MUTED, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (g_hlsetup) {
+        static const wchar_t *STEPS[] = {
+            L"Go to discord.com/developers/applications \x2192 New Application (call it e.g. \"Crosshair Health\").",
+            L"Bot \x2192 Reset Token \x2192 copy it. On the same page turn on \"Message Content Intent\".",
+            L"OAuth2 \x2192 URL Generator: tick \"bot\", then \"View Channels\" + \"Read Message History\". Open the link and add it to your server.",
+            L"In Discord: Settings \x2192 Advanced \x2192 Developer Mode on. Right-click your bug-report channel \x2192 Copy Channel ID.",
+            L"Paste both below and click Save. The token is stored encrypted on this PC only, like your GitHub token."};
+        for (int i = 0; i < 5; i++) {
+            int y = dpx(96 + i * 40);
+            RECT num = {pad, y, pad + dpx(22), y + dpx(22)};
+            rd_rrect(dc, &num, dpx(22), C_CARD, C_BORDER);
+            wchar_t d[4];
+            wsprintfW(d, L"%d", i + 1);
+            rd_text(dc, num.left, num.top, num.right, num.bottom, d, F_SMALL, C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            rd_text(dc, pad + dpx(34), y + dpx(2), w - pad, y + dpx(38), STEPS[i], F_SMALL, C_TEXT, DT_LEFT | DT_WORDBREAK);
+        }
+        rd_text(dc, pad, g_hltokbox.top - dpx(24), w - pad, g_hltokbox.top - dpx(4), L"Bot token", F_BOLD, C_TEXT, DT_LEFT | DT_SINGLELINE);
+        rd_rrect(dc, &g_hltokbox, dpx(10), C_CARD, C_BORDER);
+        rd_text(dc, pad, g_hlchanbox.top - dpx(24), w - pad, g_hlchanbox.top - dpx(4), L"Bug-report channel ID", F_BOLD, C_TEXT, DT_LEFT | DT_SINGLELINE);
+        rd_rrect(dc, &g_hlchanbox, dpx(10), C_CARD, C_BORDER);
+        rd_rrect(dc, &g_hlsave, dpx(16), g_hlhov == HL_SAVE ? C_ACCHI : C_ACCENT, g_hlhov == HL_SAVE ? C_ACCHI : C_ACCENT);
+        rd_text(dc, g_hlsave.left, g_hlsave.top, g_hlsave.right, g_hlsave.bottom, L"Save & load", F_BOLD, C_ONACC, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {
+        /* header */
+        static const wchar_t *COLS[] = {L"Players", L"Crashes", L"Errors", L"Undone", L"Reports", L"Roblox", L"Looks good"};
+        int x0 = pad + dpx(96), cw = dpx(66), y = dpx(88);
+        rd_text(dc, pad + dpx(10), y, x0, y + dpx(20), L"Version", F_SMALL, C_DIM, DT_LEFT | DT_SINGLELINE);
+        for (int c = 0; c < 7; c++) rd_text(dc, x0 + c * cw, y, x0 + (c + 1) * cw, y + dpx(20), COLS[c], F_SMALL, C_DIM, DT_CENTER | DT_SINGLELINE);
+        y += dpx(26);
+        for (int i = 0; i < g_nhv && y < cr.bottom - dpx(110); i++) {
+            HealthVer *hv = &g_hver[i];
+            int bad = hv->npc[0] >= 2 || hv->n[2] >= 1, warn = !bad && (hv->n[0] || hv->n[1] || hv->n[3] || hv->n[4]);
+            RECT rr = {pad, y, w - pad, y + dpx(58)};
+            rd_rrect(dc, &rr, dpx(12), C_CARD, C_BORDER);
+            RECT dot = {rr.left + dpx(10), rr.top + dpx(13), rr.left + dpx(18), rr.top + dpx(21)};
+            rd_rrect(dc, &dot, dpx(8), bad ? RGB(230, 76, 60) : warn ? C_WARN : RGB(46, 204, 113), bad ? RGB(230, 76, 60) : warn ? C_WARN : RGB(46, 204, 113));
+            wchar_t t[64];
+            wsprintfW(t, L"v%S", hv->ver);
+            rd_text(dc, rr.left + dpx(26), rr.top + dpx(4), x0, rr.top + dpx(30), t, F_BOLD, C_TEXT, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            for (int c = 0; c < 7; c++) {
+                int k = c == 0 ? 6 : c == 6 ? 5 : c - 1;
+                wchar_t v[32];
+                if (c == 0) wsprintfW(v, hv->npc[6] ? L"%d" : L"\x2013", hv->npc[6]);
+                else if (!hv->n[k]) wcscpy(v, L"\x2013");
+                else if (hv->npc[k] && hv->npc[k] != hv->n[k]) wsprintfW(v, L"%d (%d PC)", hv->n[k], hv->npc[k]);
+                else wsprintfW(v, L"%d", hv->n[k]);
+                COLORREF col = (c ? !hv->n[k] : !hv->npc[6]) ? C_DIM : (c == 1 || c == 3) && hv->n[k] ? RGB(240, 110, 95) : C_TEXT;
+                rd_text(dc, x0 + c * cw, rr.top + dpx(4), x0 + (c + 1) * cw, rr.top + dpx(30), v, F_SMALL, col, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            wchar_t line[300];
+            if (hv->reason[0][0]) {
+                int top = 0;
+                for (int k = 1; k < 3; k++) if (hv->rcount[k] > hv->rcount[top]) top = k;
+                wsprintfW(line, L"Most crashes: %s (%dx)", hv->reason[top], hv->rcount[top]);
+            } else if (bad) wcscpy(line, L"An update was undone on a player's PC \x2014 check the Undone reports in Discord.");
+            else if (warn) wcscpy(line, L"A few problems \x2014 see the reports in Discord.");
+            else wcscpy(line, hv->npc[6] || hv->n[5] ? L"Looks healthy." : L"No crashes or reports.");
+            rd_text(dc, rr.left + dpx(26), rr.top + dpx(30), rr.right - dpx(12), rr.bottom - dpx(6), line, F_SMALL, bad ? RGB(240, 110, 95) : C_MUTED,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            y += dpx(64);
+        }
+        rd_text(dc, pad, cr.bottom - dpx(98), w - pad, cr.bottom - dpx(66),
+                L"Players = different PCs that sent usage stats. \"2 (1 PC)\" = 2 reports from 1 PC. Red = 2+ PCs crashed or an update was undone.",
+                F_SMALL, C_DIM, DT_LEFT | DT_WORDBREAK);
+        rd_rrect(dc, &g_hlrefresh, dpx(16), g_hlhov == HL_REFRESH ? C_HOVER : C_CARD, C_BORDER);
+        rd_text(dc, g_hlrefresh.left, g_hlrefresh.top, g_hlrefresh.right, g_hlrefresh.bottom, L"Refresh", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        rd_rrect(dc, &g_hlchange, dpx(16), g_hlhov == HL_CHANGE ? C_HOVER : C_CARD, C_BORDER);
+        rd_text(dc, g_hlchange.left, g_hlchange.top, g_hlchange.right, g_hlchange.bottom, L"Change bot", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    rd_rrect(dc, &g_hlclose, dpx(16), g_hlhov == HL_CLOSE ? C_HOVER : C_CARD, C_BORDER);
+    rd_text(dc, g_hlclose.left, g_hlclose.top, g_hlclose.right, g_hlclose.bottom, L"Close", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    { HBRUSH b = CreateSolidBrush(C_BORDER); FrameRect(dc, &cr, b); DeleteObject(b); }
+    BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, obm);
+    DeleteObject(bm);
+    DeleteDC(dc);
+    EndPaint(h, &ps);
+}
+static int hl_hit(int x, int y) {
+    POINT p = {x, y};
+    if (PtInRect(&g_hlclose, p)) return HL_CLOSE;
+    if (g_hlsetup && PtInRect(&g_hlsave, p)) return HL_SAVE;
+    if (!g_hlsetup && PtInRect(&g_hlrefresh, p)) return HL_REFRESH;
+    if (!g_hlsetup && PtInRect(&g_hlchange, p)) return HL_CHANGE;
+    return -1;
+}
+static void hl_show_setup(int on) {
+    g_hlsetup = on;
+    ShowWindow(g_hltok, on ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hlchan, on ? SW_SHOW : SW_HIDE);
+    if (on) {
+        wchar_t ip[MAX_PATH], wchan[40];
+        pub_path(L"publisher.ini", ip);
+        GetPrivateProfileStringW(L"publisher", L"report_channel", L"", wchan, 40, ip);
+        SetWindowTextW(g_hlchan, wchan);
+        SetFocus(g_hltok);
+    }
+    InvalidateRect(g_hldlg, NULL, FALSE);
+}
+static void hl_reload(void) {
+    SetCursor(LoadCursorW(NULL, (LPCWSTR)IDC_WAIT));
+    wcscpy(g_hlstatus, L"Reading the report channel...");
+    InvalidateRect(g_hldlg, NULL, FALSE);
+    UpdateWindow(g_hldlg);
+    health_load();
+    hl_show_setup(g_hlsetup);
+}
+static LRESULT CALLBACK hl_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: hl_paint(h); return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, C_TEXT);
+        SetBkColor((HDC)wp, C_CARD);
+        return (LRESULT)g_pcardbr;
+    case WM_NCHITTEST: {
+        POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ScreenToClient(h, &p);
+        LRESULT r = DefWindowProcW(h, msg, wp, lp);
+        return r == HTCLIENT && hl_hit(p.x, p.y) < 0 && !(g_hlsetup && p.y > dpx(290)) ? HTCAPTION : r;
+    }
+    case WM_MOUSEMOVE: {
+        int hv = hl_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (hv != g_hlhov) { g_hlhov = hv; InvalidateRect(h, NULL, FALSE); }
+        TRACKMOUSEEVENT t = {sizeof(t), TME_LEAVE, h, 0};
+        TrackMouseEvent(&t);
+        return 0;
+    }
+    case WM_MOUSELEAVE: if (g_hlhov != -1) { g_hlhov = -1; InvalidateRect(h, NULL, FALSE); } return 0;
+    case WM_LBUTTONDOWN: {
+        int k = hl_hit(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (k == HL_CLOSE) DestroyWindow(h);
+        else if (k == HL_REFRESH) hl_reload();
+        else if (k == HL_CHANGE) { wcscpy(g_hlstatus, L"Paste a new bot token (or leave it empty to keep the saved one) and the channel ID."); hl_show_setup(1); }
+        else if (k == HL_SAVE) {
+            wchar_t wt[200], wc[40], ip[MAX_PATH];
+            char a[200];
+            GetWindowTextW(g_hltok, wt, 200);
+            GetWindowTextW(g_hlchan, wc, 40);
+            int digits = wc[0] != 0;
+            for (wchar_t *c = wc; *c; c++) if (!iswdigit(*c)) digits = 0;
+            if (!digits) { wcscpy(g_hlstatus, L"The channel ID is a long number (right-click the channel > Copy Channel ID)."); InvalidateRect(h, NULL, FALSE); return 0; }
+            pub_path(L"publisher.ini", ip);
+            WritePrivateProfileStringW(L"publisher", L"report_channel", wc, ip);
+            if (wt[0]) {
+                WideCharToMultiByte(CP_UTF8, 0, wt, -1, a, sizeof(a), NULL, NULL);
+                secret_save(SECRET_BOT, a);
+                SecureZeroMemory(a, sizeof(a));
+                SetWindowTextW(g_hltok, L"");
+            }
+            SecureZeroMemory(wt, sizeof(wt));
+            hl_reload();
+        }
+        return 0;
+    }
+    case WM_KEYDOWN: if (wp == VK_ESCAPE) DestroyWindow(h); return 0;
+    case WM_DESTROY:
+        if (g_pdlg) { EnableWindow(g_pdlg, TRUE); SetForegroundWindow(g_pdlg); }
+        g_hldlg = NULL;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+static void health_dialog(void) {
+    static int registered;
+    if (g_hldlg) { SetForegroundWindow(g_hldlg); return; }
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = hl_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"CrosshairHealth";
+        wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
+        wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+        wc.style = CS_DROPSHADOW;
+        registered = RegisterClassW(&wc) != 0;
+    }
+    int w = dpx(660), hh = dpx(720), pad = dpx(26);
+    SetRect(&g_hltokbox, pad, dpx(326), w - pad, dpx(366));
+    SetRect(&g_hlchanbox, pad, dpx(410), w - pad, dpx(450));
+    SetRect(&g_hlsave, w - pad - dpx(160), dpx(470), w - pad, dpx(508));
+    SetRect(&g_hlclose, w - pad - dpx(110), hh - dpx(56), w - pad, hh - dpx(18));
+    SetRect(&g_hlrefresh, pad, hh - dpx(56), pad + dpx(110), hh - dpx(18));
+    SetRect(&g_hlchange, pad + dpx(120), hh - dpx(56), pad + dpx(250), hh - dpx(18));
+    RECT wa;
+    GetWindowRect(g_pdlg, &wa);
+    g_hldlg = CreateWindowExW(0, L"CrosshairHealth", L"Health", WS_POPUP | WS_SYSMENU,
+                              wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - hh) / 2, w, hh, g_pdlg, NULL,
+                              GetModuleHandleW(NULL), NULL);
+    if (!g_hldlg) return;
+    g_hltok = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL | ES_PASSWORD, g_hltokbox.left + dpx(12), g_hltokbox.top + dpx(10),
+                              g_hltokbox.right - g_hltokbox.left - dpx(24), dpx(22), g_hldlg, NULL, GetModuleHandleW(NULL), NULL);
+    g_hlchan = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, g_hlchanbox.left + dpx(12), g_hlchanbox.top + dpx(10),
+                               g_hlchanbox.right - g_hlchanbox.left - dpx(24), dpx(22), g_hldlg, NULL, GetModuleHandleW(NULL), NULL);
+    SendMessageW(g_hltok, WM_SETFONT, (WPARAM)F_TEXT, TRUE);
+    SendMessageW(g_hlchan, WM_SETFONT, (WPARAM)F_TEXT, TRUE);
+    ui_dwm(g_hldlg);
+    EnableWindow(g_pdlg, FALSE);
+    ShowWindow(g_hldlg, SW_SHOWNORMAL);
+    SetForegroundWindow(g_hldlg);
+    hl_reload();
+}
+
 /* The publisher app: just the Publish window. */
 static int publisher_main(void) {
     set_dpi_aware();
@@ -6704,6 +7106,20 @@ static int publisher_main(void) {
             g_pub_busy = 1;
             publish_thread(j);
             log_info(L"test publish result: %s", g_pub_msg);
+            return 0;
+        }
+        if (GetEnvironmentVariableW(L"CH_BOT", tv, 600)) { WideCharToMultiByte(CP_UTF8, 0, tv, -1, a8, 600, NULL, NULL); secret_save(SECRET_BOT, a8); }
+        if (GetEnvironmentVariableW(L"CH_BOT_CHAN", tv, 600)) { wchar_t ip[MAX_PATH]; pub_path(L"publisher.ini", ip); WritePrivateProfileStringW(L"publisher", L"report_channel", tv, ip); }
+        if (GetEnvironmentVariableW(L"CH_HEALTH", tv, 600)) { /* open Health, log what it found, stay open CH_HEALTH ms */
+            publish_dialog();
+            health_dialog();
+            log_info(L"test health: setup=%d msgs=%d vers=%d status=%s", g_hlsetup, g_hlth_msgs, g_nhv, g_hlstatus);
+            for (int i = 0; i < g_nhv; i++)
+                log_info(L"test health: v%S players=%d crash=%d/%d err=%d undone=%d rep=%d rbx=%d ok=%d reason=%s", g_hver[i].ver, g_hver[i].npc[6], g_hver[i].n[0], g_hver[i].npc[0],
+                         g_hver[i].n[1], g_hver[i].n[2], g_hver[i].n[3], g_hver[i].n[4], g_hver[i].n[5], g_hver[i].reason[0]);
+            MSG m;
+            DWORD t0 = GetTickCount(), lim = _wtoi(tv);
+            while (GetTickCount() - t0 < lim) { while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); } Sleep(30); }
             return 0;
         }
         if (GetEnvironmentVariableW(L"CH_HISTORY", tv, 600)) { /* open History; CH_HISTORY=promote releases the newest test build */
@@ -9536,9 +9952,14 @@ static int refresh_rate(void) {
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
-static DWORD WINAPI mover(LPVOID unused) {
-    (void)unused;
+/* The crosshair window belongs to this thread, which does nothing else: moving it is instant (no queue behind the
+   settings window, screen checks or effects on the main thread - that queue is what made it trail the mouse). */
+static DWORD WINAPI mover(LPVOID ready) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST); /* = Roblox's normal level */
+    g_overlay = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                L"CrosshairOverlayWindow", L"Crosshair", WS_POPUP, 0, 0, 64, 64, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    SetEvent((HANDLE)ready);
+    if (!g_overlay) return 1;
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                           TIMER_ALL_ACCESS);
     int coarse = 0;
@@ -9558,8 +9979,7 @@ static DWORD WINAPI mover(LPVOID unused) {
             if (p.x != last.x || p.y != last.y || InterlockedExchange(&g_force_move, 0)) {
                 LONG w = g_wsz;
                 SetWindowPos(g_overlay, NULL, p.x - w / 2, p.y - w / 2, 0, 0,
-                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING |
-                             SWP_ASYNCWINDOWPOS);
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING); /* our own window: applied right now */
                 last = p;
             }
             /* Force on top: every frame, check whether any visible window has
@@ -9573,8 +9993,7 @@ static DWORD WINAPI mover(LPVOID unused) {
                     above = GetWindow(above, GW_HWNDPREV);
                 if (above) {
                     SetWindowPos(g_overlay, HWND_TOPMOST, 0, 0, 0, 0,
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
-                                     SWP_ASYNCWINDOWPOS);
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                     last_top = now;
                 }
             }
@@ -9582,11 +10001,23 @@ static DWORD WINAPI mover(LPVOID unused) {
 
         if (timer) {
             LARGE_INTEGER due;
-            due.QuadPart = -(LONGLONG)(S.hidden ? 1000000 : period_100ns); /* 10 Hz when hidden */
+            /* twice per screen refresh (moves are instant now, so this can't pile up), 10 Hz when hidden */
+            due.QuadPart = -(LONGLONG)(S.hidden ? 1000000 : period_100ns / 2);
             SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
-            WaitForSingleObject(timer, 1000);
+            /* wait for the next frame, but answer the crosshair window's messages (redraws, show/hide) the moment they come */
+            while (MsgWaitForMultipleObjects(1, &timer, FALSE, 1000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1) {
+                MSG m;
+                while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&m);
+            }
         } else {
-            Sleep(S.hidden ? 100 : 4);
+            DWORD until = GetTickCount() + (S.hidden ? 100 : 4);
+            for (;;) {
+                MSG m;
+                while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&m);
+                LONG left = (LONG)(until - GetTickCount());
+                if (left <= 0) break;
+                MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD)left, QS_ALLINPUT);
+            }
         }
     }
     if (timer) CloseHandle(timer);
@@ -9679,7 +10110,7 @@ static LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == MUSIC_FADE_TIMER) { music_fade_tick(); return 0; }
         if (wp == 2) { anim_tick(); return 0; }
         if (wp == PROB_TIMER) { KillTimer(h, PROB_TIMER); probation_pass(); return 0; }
-        if (wp == SCENE_TIMER) { scene_tick(); return 0; }
+
 #ifdef CH_TEST
         if (wp == 0x7777) { DestroyWindow(h); return 0; }
 #endif
@@ -9745,6 +10176,11 @@ static LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         save_settings();
         ui_redraw();
         return 0;
+    case WM_SCENE: /* the scene thread's decision: apply it here */
+        scene_apply((int)wp);
+        if ((int)lp != g_ac_alt) { g_ac_alt = (int)lp; if (!g_keydlg && !S.hidden) redraw_overlay(); }
+        if (g_keydlg && g_tab == TAB_COLOR) ui_redraw();
+        return 0;
     case WM_TESTER_OK:
         if (wp) { lstrcpynW(g_tester_ok, VER_WSTR, 24); save_settings(); ui_set_status(L"Sent to simplysoul \x2014 thanks for testing!"); }
         else ui_set_status(L"Couldn't send it (no internet?). Try again in a bit.");
@@ -9797,6 +10233,7 @@ static LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static LRESULT CALLBACK overlay_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_OV_AFFINITY) return set_affinity(h, (DWORD)wp);
     if (msg == WM_NCHITTEST) return HTTRANSPARENT;
     if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     return DefWindowProcW(h, msg, wp, lp);
@@ -11000,10 +11437,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
 
     g_host = CreateWindowExW(WS_EX_TOOLWINDOW, L"CrosshairOverlayHost", L"Crosshair Overlay",
                              WS_POPUP, 0, 0, 0, 0, NULL, NULL, inst, NULL);
-    g_overlay = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
-                                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                                L"CrosshairOverlayWindow", L"Crosshair", WS_POPUP, 0, 0, 64, 64,
-                                NULL, NULL, inst, NULL);
+    HANDLE ov_ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    HANDLE th = CreateThread(NULL, 0, mover, ov_ready, 0, NULL); /* makes the crosshair window, then follows the mouse */
+    if (ov_ready) { WaitForSingleObject(ov_ready, 10000); CloseHandle(ov_ready); }
     g_card = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
                                  WS_EX_NOACTIVATE,
                              L"CrosshairKeysCard", L"Keybinds", WS_POPUP, 0, 0, 10, 10, NULL, NULL, inst, NULL);
@@ -11131,7 +11567,6 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     { wchar_t tb[8]; if (GetEnvironmentVariableW(L"CH_CRASH", tb, 8)) { Sleep(1500); if (tb[0] == L'2') { volatile const char *np = NULL; char d[8]; memcpy(d, (const void *)np, 8); log_info(L"%S", d); } *(volatile int *)0 = 0; } }
 #endif
     SetTimer(g_host, 1, 3000, NULL);
-    HANDLE th = CreateThread(NULL, 0, mover, NULL, 0, NULL);
     HANDLE wt = CreateThread(NULL, 0, rbx_watch, NULL, 0, NULL);
     { HANDLE ct = CreateThread(NULL, 0, rbx_crash_watch, NULL, 0, NULL); if (ct) { SetThreadPriority(ct, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(ct); } }
     if (wt) SetThreadPriority(wt, THREAD_PRIORITY_BELOW_NORMAL);
