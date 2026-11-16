@@ -2,7 +2,8 @@
 """Builds symbols.bin: the app's function names and where they start, built into the exe.
 When the app crashes it looks up the crash address here, so the report says *where* it
 crashed in plain words (e.g. "while drawing the settings window (ui_paint)") instead of a number.
-The file always has the same size, so adding it doesn't move any code (build.sh links twice).
+It lives in the resources, after the code, so its size never moves any code (build.sh links twice
+and checks that).
   make-symbols.py --placeholder      write an empty table
   make-symbols.py <unstripped.exe>   write the real table"""
 import os, subprocess, sys
@@ -26,5 +27,5 @@ if len(sys.argv) > 1 and sys.argv[1] != "--placeholder":
         lines = [l for l in lines if not l.split()[1].startswith(("_", "mingw", "__"))]
         body = "".join(lines).encode()[:SIZE]
 with open(out, "wb") as f:
-    f.write(body + b"\n" * (SIZE - len(body)))
+    f.write(body or b"\n")
 print(f"symbols.bin: {body.count(b'\n')} functions")

@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")"
 VER=$(sed -n 's/#define VER_STR "\(.*\)"/\1/p' version.h)
 LIBS="-luser32 -lgdi32 -lshell32 -lwinmm -lcomctl32 -lcomdlg32 -ladvapi32 -lwinhttp -lbcrypt -lcrypt32 -lversion -lwevtapi -static-libgcc"
-# pass 1: placeholder symbol table (same size as the real one, so code addresses don't move)
+# pass 1: placeholder symbol table (it sits in the resources, after the code, so code addresses don't move)
 python3 make-symbols.py --placeholder
 x86_64-w64-mingw32-windres app.rc -O coff -o app_res.o
 x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -mwindows $EXTRA \

@@ -65,6 +65,15 @@ static int g_nudge_x, g_nudge_y; /* fine-tune: move the crosshair a few pixels (
 #define WM_NEWS (WM_APP + 9)
 #define WM_TESTER_OK (WM_APP + 10)
 #define WM_SAVE_LATER (WM_APP + 11) /* save settings on the main thread */
+/* Safe mode (hold Shift while starting, or tray > Restart in safe mode): settings and keybinds start at
+   the defaults and aren't saved over, so a broken settings file can't keep the app from working. */
+static int g_safe, g_safe_keep;
+#define SAFE_UNSAVED() (g_safe && !g_safe_keep)
+/* How long the app took to get the crosshair on screen (not counting the intro animation). */
+static int g_start_ms = -1, g_start_avg = -1;
+static double g_steps_ms;
+/* Colorblind mode: 0 off, 1 red-green, 2 blue-yellow, 3 no color. Fades colors that are hard to see. */
+static int g_cb;
 /* Announcement from the developer (news.txt in the repo). */
 static wchar_t g_news[260];
 static unsigned g_news_hash, g_news_seen, g_news_dismissed;
@@ -256,8 +265,10 @@ static void ini_set(const wchar_t *k, int v) {
 }
 
 static void load_profiles(void);
+static void load_pc_state(void);
 static void load_settings(void) {
         g_first_run_ini = g_ini[0] && GetFileAttributesW(g_ini) == INVALID_FILE_ATTRIBUTES;
+    if (g_safe) { load_profiles(); load_pc_state(); return; } /* safe mode: everything else stays at the defaults */
     S.style   = style_fix(ini_get(L"style", S.style));
     S.color   = clampi(ini_get(L"color", S.color), 0, NCOLORS - 1);
     S.size    = clampi(ini_get(L"size", S.size), 0, NSIZES - 1);
@@ -290,23 +301,34 @@ static void load_settings(void) {
     g_crim_intro = ini_get(L"criminal_intro", 0) ? 1 : 0;
     g_music_start = clampi(ini_get(L"music_start", 0), 0, 3600);
     if (g_ini[0]) GetPrivateProfileStringW(L"crosshair", L"music_path", L"", g_music, MAX_PATH, g_ini);
-    g_fps = clampi(ini_get(L"roblox_fps_cap", g_fps), 0, NFPS - 1);
-    g_boost = clampi(ini_get(L"roblox_boost", g_boost), 0, 2);
-    g_stats = ini_get(L"usage_stats", 0) ? 1 : 0;
-    g_tbuilds = ini_get(L"tester_builds", 1) ? 1 : 0;
     g_last_tab = clampi(ini_get(L"last_tab", 0), 0, 9);
     g_nudge_x = clampi(ini_get(L"nudge_x", 0), -10, 10);
     g_nudge_y = clampi(ini_get(L"nudge_y", 0), -10, 10);
     if (ini_get(L"nudge_v", 0) < 3) { g_nudge_x = g_nudge_y = 0; ini_set(L"nudge_v", 3); } /* 1.16.3: back to the 1.15.1 position, start fresh */
-    g_is_tester = ini_get(L"was_tester", 0) ? 1 : 0; /* until the update check confirms it */
-    if (g_ini[0]) GetPrivateProfileStringW(L"crosshair", L"tester_ok", L"", g_tester_ok, 24, g_ini);
-    g_gpu = ini_get(L"roblox_gpu", g_gpu) ? 1 : 0;
-    g_reports = clampi(ini_get(L"bug_reports", g_reports), 0, 2);
-    g_autoupd = ini_get(L"auto_update", g_autoupd) ? 1 : 0;
     g_ui_size = clampi(ini_get(L"panel_size", g_ui_size), 0, 3);
-    if (g_ini[0]) GetPrivateProfileStringW(L"crosshair", L"skip_update", L"", g_skip_ver, 32, g_ini);
     g_nocap = ini_get(L"hide_from_recordings", g_nocap) ? 1 : 0;
     g_onlyrbx = ini_get(L"only_in_roblox", g_onlyrbx) ? 1 : 0;
+    g_cb = clampi(ini_get(L"colorblind", 0), 0, 3);
+    {
+        int a = ini_get(L"theme_accent", -1), b = ini_get(L"theme_bg", -1);
+        g_cust_accent = a >= 0 ? (COLORREF)(a & 0xFFFFFF) : RGB(0, 200, 170);
+        g_cust_bg = b >= 0 ? (COLORREF)(b & 0xFFFFFF) : RGB(14, 17, 23);
+    }
+    load_pc_state();
+}
+/* Things about this PC / install rather than the player's setup (loaded in safe mode too). */
+static void load_pc_state(void) {
+    g_fps = clampi(ini_get(L"roblox_fps_cap", g_fps), 0, NFPS - 1); /* mirror Roblox's own files, so keep them */
+    g_boost = clampi(ini_get(L"roblox_boost", g_boost), 0, 2);
+    g_gpu = ini_get(L"roblox_gpu", g_gpu) ? 1 : 0;
+    g_stats = ini_get(L"usage_stats", 0) ? 1 : 0;
+    g_tbuilds = ini_get(L"tester_builds", 1) ? 1 : 0;
+    g_start_avg = ini_get(L"startup_avg", -1);
+    g_is_tester = ini_get(L"was_tester", 0) ? 1 : 0; /* until the update check confirms it */
+    if (g_ini[0]) GetPrivateProfileStringW(L"crosshair", L"tester_ok", L"", g_tester_ok, 24, g_ini);
+    g_reports = clampi(ini_get(L"bug_reports", g_reports), 0, 2);
+    g_autoupd = ini_get(L"auto_update", g_autoupd) ? 1 : 0;
+    if (g_ini[0]) GetPrivateProfileStringW(L"crosshair", L"skip_update", L"", g_skip_ver, 32, g_ini);
     g_news_seen = (unsigned)ini_get(L"news_seen", 0);
     g_want_recent = 1;
     g_news_dismissed = (unsigned)ini_get(L"news_dismissed", 0);
@@ -317,14 +339,20 @@ static void load_settings(void) {
         wsprintfW(g_report_id, L"%08lx", (unsigned long)(q.LowPart ^ (GetCurrentProcessId() << 16) ^ GetTickCount() * 2654435761u));
         if (g_ini[0]) WritePrivateProfileStringW(L"crosshair", L"report_id", g_report_id, g_ini);
     }
-    {
-        int a = ini_get(L"theme_accent", -1), b = ini_get(L"theme_bg", -1);
-        g_cust_accent = a >= 0 ? (COLORREF)(a & 0xFFFFFF) : RGB(0, 200, 170);
-        g_cust_bg = b >= 0 ? (COLORREF)(b & 0xFFFFFF) : RGB(14, 17, 23);
-    }
 }
 
+static void save_pc_state(void) {
+    ini_set(L"roblox_fps_cap", g_fps); ini_set(L"roblox_boost", g_boost); ini_set(L"roblox_gpu", g_gpu);
+    ini_set(L"usage_stats", g_stats); ini_set(L"tester_builds", g_tbuilds); ini_set(L"was_tester", g_is_tester ? 1 : 0);
+    if (g_ini[0]) WritePrivateProfileStringW(L"crosshair", L"tester_ok", g_tester_ok, g_ini);
+    ini_set(L"bug_reports", g_reports);
+    ini_set(L"auto_update", g_autoupd);
+    ini_set(L"news_seen", (int)g_news_seen);
+    ini_set(L"news_dismissed", (int)g_news_dismissed);
+}
 static void save_settings(void) {
+    if (SAFE_UNSAVED()) { save_pc_state(); return; } /* safe mode: don't write the defaults over the player's setup */
+    ini_set(L"colorblind", g_cb);
     ini_set(L"style", S.style);     ini_set(L"color", S.color);
     ini_set(L"size", S.size);       ini_set(L"thickness", S.thick);
     ini_set(L"outline", S.outline); ini_set(L"center", S.center);
@@ -896,7 +924,7 @@ static void report_startup(void) {
     if (report_send(crash ? 0 : 1, NULL, NULL) && crash) {
         /* let them add what they were doing */
         g_nid.uFlags = NIF_INFO;
-        wcscpy(g_nid.szInfoTitle, L"Sorry \x2014 the app crashed last time");
+        wcscpy(g_nid.szInfoTitle, L"The app crashed last time");
         wcscpy(g_nid.szInfo, L"A crash report was sent to simplysoul. Click here to say what you were doing when it happened.");
         g_nid.dwInfoFlags = NIIF_INFO;
         Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -1316,17 +1344,23 @@ static int tester_check(void) {
 }
 
 /* The developer's announcement: news.txt in the repo. Lines starting with # are skipped. */
-static void news_check(void) {
+/* api = 1: ask the GitHub API (always fresh, but only 60 asks an hour per network), else the raw file
+   with a never-repeating ?t= so GitHub's 5-minute cache is skipped. */
+static void news_check_ex(int api) {
     wchar_t url[400], w[260];
     char *txt = NULL, msg[1024];
-    int n = 0;
-    wsprintfW(url, L"%s/repos/%s/contents/news.txt", gh_api(), UPDATE_REPO);
-    int st = https_req(L"GET", url, L"Accept: application/vnd.github.raw+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n", NULL, 0, &txt, NULL, 64 * 1024);
+    int n = 0, st = 0;
+    if (api) {
+        wsprintfW(url, L"%s/repos/%s/contents/news.txt", gh_api(), UPDATE_REPO);
+        st = https_req(L"GET", url, L"Accept: application/vnd.github.raw+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n", NULL, 0, &txt, NULL, 64 * 1024);
+    }
     if (st != 200 && st != 404) {
         free(txt);
         txt = NULL;
-        wsprintfW(url, L"%s/%s/HEAD/news.txt", gh_raw(), UPDATE_REPO);
-        st = https_req(L"GET", url, NULL, NULL, 0, &txt, NULL, 64 * 1024);
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        wsprintfW(url, L"%s/%s/HEAD/news.txt?t=%lu%lu", gh_raw(), UPDATE_REPO, ft.dwHighDateTime, ft.dwLowDateTime / 10000);
+        st = https_req(L"GET", url, L"Cache-Control: no-cache\r\n", NULL, 0, &txt, NULL, 64 * 1024);
     }
     if (st != 200 && st != 404) { free(txt); return; } /* offline: keep what we had */
     msg[0] = 0;
@@ -1360,7 +1394,30 @@ static void news_check(void) {
     wcscpy(g_news, w);
     InterlockedExchange((volatile LONG *)&g_news_hash, (LONG)h);
     if (h) log_info(L"announcement: %s", w);
+    else log_info(L"announcement removed");
     if (g_host) PostMessageW(g_host, WM_NEWS, 0, 0);
+}
+/* Live announcements: checks every minute while the settings panel is open, every 3 minutes otherwise,
+   and right away when the panel opens, so a new announcement shows up without restarting the app. */
+static HANDLE g_news_wake;
+static volatile LONG g_news_api_tick;
+static DWORD WINAPI news_thread(LPVOID p) {
+    (void)p;
+    DWORD every_open = 60000, every_closed = 180000;
+#ifdef CH_TEST
+    { wchar_t t[16]; if (GetEnvironmentVariableW(L"CH_NEWS_POLL", t, 16)) every_open = every_closed = (DWORD)_wtoi(t); }
+#endif
+    int first = 1;
+    while (g_running) {
+        DWORD now = GetTickCount();
+        /* the API (fresh) at most every 2 minutes; the cache-skipping raw file in between */
+        int api = first || now - (DWORD)g_news_api_tick > 120000;
+        if (api) InterlockedExchange(&g_news_api_tick, (LONG)now);
+        news_check_ex(api);
+        first = 0;
+        WaitForSingleObject(g_news_wake, g_keydlg ? every_open : every_closed);
+    }
+    return 0;
 }
 
 /* A message with no file to a Discord webhook. 1 = accepted. */
@@ -1414,8 +1471,7 @@ static DWORD WINAPI update_thread(LPVOID p) {
     InterlockedExchange(&g_upd_state, UPD_CHECKING);
     if (g_host) PostMessageW(g_host, WM_UPDATE_DONE, (WPARAM)manual, UPD_CHECKING);
     int tester = tester_check() && g_tbuilds;
-    news_check();
-    stats_maybe_send(0);
+    stats_maybe_send(0); /* (announcements have their own thread now) */
     if (tester) wsprintfW(url, L"%s/repos/%s/releases?per_page=20", gh_api(), UPDATE_REPO);
     else wsprintfW(url, L"%s/repos/%s/releases/latest", gh_api(), UPDATE_REPO);
     int st = https_req(L"GET", url, L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
@@ -3000,7 +3056,7 @@ static RbxCrash *rbx_analyze(DWORD pid, DWORD code, DWORD ran_s, int peak_mem, c
     if (code == 0xC0000142 || code == 0xC0000135 || code == 0xC0000022)
         ADDC(L"Roblox couldn't start properly (blocked or broken install)", L"Reinstall Roblox and allow it in your antivirus.");
     if (gyear && gyear < now.wYear - 1)
-        ADDC(L"Old graphics driver", L"Your graphics driver is from more than a year ago \x2014 update it.");
+        ADDC(L"Old graphics driver", L"Your graphics driver is over a year old. Try updating it.");
     if (free_gb >= 0 && free_gb < 3) ADDC(L"Almost no free space on C:", L"Free up a few GB on C: (Roblox needs room for its cache and updates).");
     if (ran_s < 20) ADDC(L"Crashed while starting", L"Reinstall Roblox (or use your launcher's Reinstall option); check your antivirus isn't blocking it.");
     if (g_boost || g_fps > 0)
@@ -3429,7 +3485,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS *e) {
             crumbs_text(before, 500, 6);
             if (before[0]) log_warn(L"CRASH before: %s", before);
             log_warn(L"CRASH fix: %s", fix ? fix : !inexe && !dllwhat ? L"Another program's code crashed inside this app. Note which programs you run (overlays, antivirus, RGB/audio tools) and tell simplysoul."
-                                                                     : L"This is a bug in the app \x2014 simplysoul has what's needed to fix it.");
+                                                                     : L"This is a bug in the app. simplysoul has what's needed to fix it.");
             log_warn(L"CRASH detail: exception 0x%08lx at %s+0x%lx, stack %s", (unsigned long)code, inexe ? L"exe" : (modn[0] ? modn : L"?"),
                      (unsigned long)(inexe ? addr - base : 0), chain[0] ? chain : L"-");
             if (g_pendp[0]) { DeleteFileW(g_pendp); append_utf8(g_pendp, L"crash"); }
@@ -4234,6 +4290,7 @@ static void fkey_binds(void) {
 static void load_binds(void) {
     wchar_t k[40];
     default_binds();
+    if (g_safe) { for (int i = 0; i < NSTYLES; i++) if (!style_shown(i)) { KB[A_STYLE0 + i].vk = 0; KB[A_STYLE0 + i].mods = 0; } return; }
     for (int i = 0; i < NACT; i++) {
         action_ini_key(i, k);
         int v = ini_get(k, -1);
@@ -4245,6 +4302,7 @@ static void load_binds(void) {
 }
 static void save_binds(void) {
     wchar_t k[40];
+    if (SAFE_UNSAVED()) return;
     for (int i = 0; i < NACT; i++) {
         action_ini_key(i, k);
         ini_set(k, (int)((KB[i].mods << 16) | KB[i].vk));
@@ -4410,12 +4468,13 @@ static void make_fonts(void) {
     F_TEXT = ui_font(10, FW_NORMAL);
     F_BOLD = ui_font(10, FW_SEMIBOLD);
     F_SMALL = ui_font(9, FW_NORMAL);
-    F_TINY = face_font(hud_face(), 8, FW_SEMIBOLD);
+    F_TINY = ui_font(8, FW_SEMIBOLD);
     F_XS = ui_font(8, FW_NORMAL);
     int cond = wcsstr(hud_face(), L"Condensed") != NULL; /* a wide fallback font gets smaller sizes so tabs still fit */
-    F_HUD = face_font(hud_face(), cond ? 15 : 13, FW_BOLD);
-    F_TAB = face_font(hud_face(), cond ? 11 : 9, FW_SEMIBOLD);
-    F_HUDS = face_font(hud_face(), 9, FW_SEMIBOLD);
+    (void)cond;
+    F_HUD = ui_font(13, FW_SEMIBOLD);
+    F_TAB = ui_font(10, FW_SEMIBOLD);
+    F_HUDS = ui_font(9, FW_SEMIBOLD);
 }
 
 /* ---------------- themes ---------------- */
@@ -4621,6 +4680,12 @@ static void p_fill(int x0, int y0, int x1, int y1, COLORREF c) {
     bounds((float)x0, (float)y0, (float)x1, (float)y1, &ix0, &iy0, &ix1, &iy1);
     for (int y = iy0; y < iy1; y++)
         for (int x = ix0; x < ix1; x++) g_px[y * g_pw + x] = v;
+}
+static void p_fill_a(int x0, int y0, int x1, int y1, COLORREF c, float a) {
+    int ix0, iy0, ix1, iy1;
+    bounds((float)x0, (float)y0, (float)x1, (float)y1, &ix0, &iy0, &ix1, &iy1);
+    for (int y = iy0; y < iy1; y++)
+        for (int x = ix0; x < ix1; x++) blend(x, y, c, a);
 }
 
 static float rbox_d(float px, float py, float cx, float cy, float hw, float hh, float r) {
@@ -5387,6 +5452,7 @@ static int g_rcat = -1, g_roften = -1, g_rdoing = -1, g_rhov = RH_NONE, g_rwarn,
 static RECT g_rchip[NRCAT], g_roft[NROFTEN], g_rdo[NRDOING], g_rsend, g_rcancel, g_reditbox;
 static HBRUSH g_rcardbr;
 static void ui_set_status(const wchar_t *s);
+static void restart_self(int safe);
 static void ui_dwm(HWND h);
 static int dpx(int v);
 static void sync_cursor(void);
@@ -5430,17 +5496,16 @@ static void rd_paint(HWND h) {
     HBRUSH bg = CreateSolidBrush(C_BG);
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
-    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
     SetBkMode(dc, TRANSPARENT);
     int pad = dpx(26), w = cr.right;
     rd_text(dc, pad, dpx(20), w - pad, dpx(52), L"Report a problem", F_HEAD, C_TEXT, DT_LEFT | DT_SINGLELINE);
-    rd_text(dc, pad, dpx(54), w - pad, dpx(76), L"A few clicks is enough \x2014 it goes straight to simplysoul with your app's log.", F_SMALL, C_MUTED, DT_LEFT | DT_SINGLELINE);
+    rd_text(dc, pad, dpx(54), w - pad, dpx(76), L"Goes to simplysoul with the app's log.", F_SMALL, C_MUTED, DT_LEFT | DT_SINGLELINE);
     rd_text(dc, pad, dpx(92), w - pad, dpx(116), L"1.  What's wrong?", F_BOLD, g_rwarn ? C_WARN : C_TEXT, DT_LEFT | DT_SINGLELINE);
     if (g_rwarn) rd_text(dc, pad, dpx(92), w - pad, dpx(116), L"Pick one first", F_SMALL, C_WARN, DT_RIGHT | DT_SINGLELINE);
     rd_text(dc, pad, dpx(226), w - pad, dpx(250), L"2.  How often?", F_BOLD, C_TEXT, DT_LEFT | DT_SINGLELINE);
-    rd_text(dc, pad, dpx(226), w - pad, dpx(250), L"optional", F_SMALL, C_DIM, DT_RIGHT | DT_SINGLELINE);
+    rd_text(dc, pad, dpx(226), w - pad, dpx(250), L"optional", F_SMALL, C_DIM, DT_RIGHT | DT_SINGLELINE | DT_NOCLIP);
     rd_text(dc, pad, dpx(298), w - pad, dpx(322), L"3.  What were you doing?", F_BOLD, C_TEXT, DT_LEFT | DT_SINGLELINE);
-    rd_text(dc, pad, dpx(298), w - pad, dpx(322), L"optional", F_SMALL, C_DIM, DT_RIGHT | DT_SINGLELINE);
+    rd_text(dc, pad, dpx(298), w - pad, dpx(322), L"optional", F_SMALL, C_DIM, DT_RIGHT | DT_SINGLELINE | DT_NOCLIP);
     for (int i = 0; i < NROFTEN; i++) {
         int sel = i == g_roften, hv = RH_OFTEN + i == g_rhov;
         rd_rrect(dc, &g_roft[i], dpx(12), sel ? C_ACCENT : hv ? C_HOVER : C_CARD, sel ? C_ACCENT : C_BORDER);
@@ -5458,7 +5523,7 @@ static void rd_paint(HWND h) {
                 sel ? F_BOLD : F_TEXT, sel ? C_ONACC : C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     rd_text(dc, pad, dpx(370), w - pad, dpx(394), L"4.  Anything else?", F_BOLD, C_TEXT, DT_LEFT | DT_SINGLELINE);
-    rd_text(dc, pad, dpx(370), w - pad, dpx(394), L"optional \x2014 which game, what you clicked...", F_SMALL, C_DIM, DT_RIGHT | DT_SINGLELINE);
+    rd_text(dc, pad, dpx(370), w - pad, dpx(394), L"optional", F_SMALL, C_DIM, DT_RIGHT | DT_SINGLELINE | DT_NOCLIP);
     rd_rrect(dc, &g_reditbox, dpx(12), C_CARD, GetFocus() == g_redit ? C_ACCENT : C_BORDER);
     rd_text(dc, pad, dpx(504), w - pad, dpx(526),
             L"Sent with it: the app's log, settings, Windows version and screen size. No personal files.",
@@ -5636,7 +5701,6 @@ static void wn_paint(HWND h) {
     HBRUSH bg = CreateSolidBrush(C_BG);
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
-    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
     SetBkMode(dc, TRANSPARENT);
     int pad = dpx(26), w = cr.right;
     rd_text(dc, pad, dpx(20), w - pad, dpx(52), L"What's new in v" VER_WSTR, F_HEAD, C_TEXT, DT_LEFT | DT_SINGLELINE);
@@ -5814,7 +5878,6 @@ static void pd_paint(HWND h) {
     HBRUSH bg = CreateSolidBrush(C_BG);
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
-    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
     SetBkMode(dc, TRANSPARENT);
     int pad = dpx(26), w = cr.right;
     wchar_t t[400];
@@ -5889,7 +5952,7 @@ static void pd_paint(HWND h) {
     rd_rrect(dc, &g_pnews, dpx(16), g_phov == PH_NEWS ? C_HOVER : C_CARD, C_BORDER);
     rd_text(dc, g_pnews.left, g_pnews.top, g_pnews.right, g_pnews.bottom, L"Announcement", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     rd_rrect(dc, &g_phealth, dpx(16), g_phov == PH_HEALTH ? C_HOVER : C_CARD, C_BORDER);
-    rd_text(dc, g_phealth.left, g_phealth.top, g_phealth.right, g_phealth.bottom, L"\x2665  Health", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    rd_text(dc, g_phealth.left, g_phealth.top, g_phealth.right, g_phealth.bottom, L"Health", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     rd_rrect(dc, &g_phist, dpx(16), g_phov == PH_HISTORY ? C_HOVER : C_CARD, C_BORDER);
     rd_text(dc, g_phist.left, g_phist.top, g_phist.right, g_phist.bottom, L"History", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     rd_rrect(dc, &g_pclose, dpx(16), g_phov == PH_CLOSE ? C_HOVER : C_CARD, C_BORDER);
@@ -6331,7 +6394,6 @@ static void td_paint(HWND h) {
     HBRUSH bg = CreateSolidBrush(C_BG);
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
-    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
     SetBkMode(dc, TRANSPARENT);
     int pad = dpx(26), w = cr.right;
     rd_text(dc, pad, dpx(20), w - pad, dpx(52), g_tkind ? L"Announcement" : L"Q/A testers", F_HEAD, C_TEXT, DT_LEFT | DT_SINGLELINE);
@@ -6577,7 +6639,6 @@ static void hd_paint(HWND h) {
     HBRUSH bg = CreateSolidBrush(C_BG);
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
-    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
     SetBkMode(dc, TRANSPARENT);
     int pad = dpx(26), w = cr.right;
     rd_text(dc, pad, dpx(20), w - pad, dpx(52), L"Release history", F_HEAD, C_TEXT, DT_LEFT | DT_SINGLELINE);
@@ -6709,6 +6770,7 @@ typedef struct {
     int npc[7];
     wchar_t reason[3][120]; int rcount[3];
     char first[11];       /* newest message date for this version */
+    int st_sum, st_n, st_max; /* startup time (ms) from usage stats */
 } HealthVer;
 static HealthVer g_hver[NHV];
 static int g_nhv, g_hlth_msgs, g_hlhov = -1, g_hlsetup;
@@ -6845,6 +6907,18 @@ static int health_load(void) {
                     rw[119] = 0;
                 }
                 hv_add(ver, kind, pc, rw, date);
+                if (kind == 6) { /* usage line: "start 0.4 s" */
+                    const char *q = strstr(content, "start ");
+                    int a = 0, b = 0;
+                    if (q && sscanf(q + 6, "%d.%d s", &a, &b) >= 1 && (a || b))
+                        for (int k = 0; k < g_nhv; k++)
+                            if (!strcmp(g_hver[k].ver, ver)) {
+                                int ms = a * 1000 + b * 100;
+                                g_hver[k].st_sum += ms;
+                                g_hver[k].st_n++;
+                                if (ms > g_hver[k].st_max) g_hver[k].st_max = ms;
+                            }
+                }
                 start = NULL;
             }
         }
@@ -6873,7 +6947,6 @@ static void hl_paint(HWND h) {
     HBRUSH bg = CreateSolidBrush(C_BG);
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
-    { RECT strip = {0, 0, cr.right, dpx(3)}; HBRUSH a = CreateSolidBrush(C_ACCENT); FillRect(dc, &strip, a); DeleteObject(a); }
     SetBkMode(dc, TRANSPARENT);
     int pad = dpx(26), w = cr.right;
     rd_text(dc, pad, dpx(20), w - pad, dpx(52), L"Health", F_HEAD, C_TEXT, DT_LEFT | DT_SINGLELINE);
@@ -6902,10 +6975,10 @@ static void hl_paint(HWND h) {
         rd_text(dc, g_hlsave.left, g_hlsave.top, g_hlsave.right, g_hlsave.bottom, L"Save & load", F_BOLD, C_ONACC, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     } else {
         /* header */
-        static const wchar_t *COLS[] = {L"Players", L"Crashes", L"Errors", L"Undone", L"Reports", L"Roblox", L"Looks good"};
-        int x0 = pad + dpx(96), cw = dpx(66), y = dpx(88);
+        static const wchar_t *COLS[] = {L"Players", L"Crashes", L"Errors", L"Undone", L"Reports", L"Roblox", L"Tester OK", L"Startup"};
+        int x0 = pad + dpx(88), cw = dpx(60), y = dpx(88);
         rd_text(dc, pad + dpx(10), y, x0, y + dpx(20), L"Version", F_SMALL, C_DIM, DT_LEFT | DT_SINGLELINE);
-        for (int c = 0; c < 7; c++) rd_text(dc, x0 + c * cw, y, x0 + (c + 1) * cw, y + dpx(20), COLS[c], F_SMALL, C_DIM, DT_CENTER | DT_SINGLELINE);
+        for (int c = 0; c < 8; c++) rd_text(dc, x0 + c * cw, y, x0 + (c + 1) * cw, y + dpx(20), COLS[c], F_SMALL, C_DIM, DT_CENTER | DT_SINGLELINE);
         y += dpx(26);
         for (int i = 0; i < g_nhv && y < cr.bottom - dpx(110); i++) {
             HealthVer *hv = &g_hver[i];
@@ -6927,20 +7000,28 @@ static void hl_paint(HWND h) {
                 COLORREF col = (c ? !hv->n[k] : !hv->npc[6]) ? C_DIM : (c == 1 || c == 3) && hv->n[k] ? RGB(240, 110, 95) : C_TEXT;
                 rd_text(dc, x0 + c * cw, rr.top + dpx(4), x0 + (c + 1) * cw, rr.top + dpx(30), v, F_SMALL, col, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
+            {   /* average startup time from usage stats; orange over 3 s */
+                wchar_t v[32];
+                int avg = hv->st_n ? hv->st_sum / hv->st_n : 0;
+                if (hv->st_n) wsprintfW(v, L"%d.%d s", avg / 1000, avg % 1000 / 100); else wcscpy(v, L"\x2013");
+                rd_text(dc, x0 + 7 * cw, rr.top + dpx(4), x0 + 8 * cw, rr.top + dpx(30), v, F_SMALL, !hv->st_n ? C_DIM : avg > 3000 ? C_WARN : C_TEXT,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
             wchar_t line[300];
             if (hv->reason[0][0]) {
                 int top = 0;
                 for (int k = 1; k < 3; k++) if (hv->rcount[k] > hv->rcount[top]) top = k;
                 wsprintfW(line, L"Most crashes: %s (%dx)", hv->reason[top], hv->rcount[top]);
-            } else if (bad) wcscpy(line, L"An update was undone on a player's PC \x2014 check the Undone reports in Discord.");
-            else if (warn) wcscpy(line, L"A few problems \x2014 see the reports in Discord.");
+            } else if (bad) wcscpy(line, L"An update was undone on a player's PC. Check the Undone reports in Discord.");
+            else if (warn) wcscpy(line, L"A few problems, see the reports in Discord.");
+            else if (hv->st_max > 5000) wsprintfW(line, L"Starting up is slow on some PCs (up to %d.%d s).", hv->st_max / 1000, hv->st_max % 1000 / 100);
             else wcscpy(line, hv->npc[6] || hv->n[5] ? L"Looks healthy." : L"No crashes or reports.");
             rd_text(dc, rr.left + dpx(26), rr.top + dpx(30), rr.right - dpx(12), rr.bottom - dpx(6), line, F_SMALL, bad ? RGB(240, 110, 95) : C_MUTED,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             y += dpx(64);
         }
         rd_text(dc, pad, cr.bottom - dpx(98), w - pad, cr.bottom - dpx(66),
-                L"Players = different PCs that sent usage stats. \"2 (1 PC)\" = 2 reports from 1 PC. Red = 2+ PCs crashed or an update was undone.",
+                L"Players = different PCs that sent usage stats. \"2 (1 PC)\" = 2 reports from 1 PC. Startup = average time to get the crosshair on screen. Red = 2+ PCs crashed or an update was undone.",
                 F_SMALL, C_DIM, DT_LEFT | DT_WORDBREAK);
         rd_rrect(dc, &g_hlrefresh, dpx(16), g_hlhov == HL_REFRESH ? C_HOVER : C_CARD, C_BORDER);
         rd_text(dc, g_hlrefresh.left, g_hlrefresh.top, g_hlrefresh.right, g_hlrefresh.bottom, L"Refresh", F_BOLD, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -7171,17 +7252,9 @@ enum { TAB_CROSSHAIR, TAB_COLOR, TAB_LOOK, TAB_FX, TAB_THEME, TAB_PROFILES, TAB_
 static const wchar_t *TAB_NAMES[NTABS] = {L"Crosshair", L"Color", L"Size & Look", L"Effects", L"Themes", L"Profiles",
                                           L"Keybinds", L"FPS Boost", L"General", L"Updates"};
 static const wchar_t *TAB_SHORT[NTABS] = {L"Crosshair", L"Color", L"Look", L"Effects", L"Themes", L"Profiles", L"Keybinds", L"FPS Boost", L"General", L"Updates"};
-static const wchar_t *TAB_SUBS[NTABS] = {
-    L"Pick the shape of your crosshair", L"Pick a color, or make your own",
-    L"Size, thickness, opacity and the cover patch", L"Glow, rainbow, pulse, click reaction and recordings",
-    L"Change how this panel and the loading screen look",
-    L"Save up to three setups and switch in one click",
-    L"Optional shortcuts \x2014 everything also works by clicking",
-    L"Unlock Roblox's frame rate and squeeze out more FPS", L"How the overlay behaves",
-    L"Your version, updates and everything that changed"};
 enum { H_NONE, H_CLOSE, H_TAB, H_STYLE, H_COLOR, H_PICK, H_SLIDER, H_TOGGLE, H_COVER, H_COVERCOL,
        H_KEY, H_KEYCLEAR, H_KRESET, H_MODE, H_BUTTON, H_KFKEY, H_DONE, H_FXSEG, H_SPEED, H_PREVIEW,
-       H_PLOAD, H_PSAVE, H_THEME, H_THPICK, H_SPLASHPREV, H_CRIMINTRO, H_MUSIC, H_FPS, H_BOOST, H_PERFBTN, H_SIZE, H_ONLYRBX, H_NEWSX, H_RCODE, H_RCODEX, H_SEARCH, H_SEARCHRES, H_TOURNEXT, H_TOURSKIP, H_TOURBLOCK, H_NUDGE, H_LAYERSEL };
+       H_PLOAD, H_PSAVE, H_THEME, H_THPICK, H_SPLASHPREV, H_CRIMINTRO, H_MUSIC, H_FPS, H_BOOST, H_PERFBTN, H_SIZE, H_ONLYRBX, H_NEWSX, H_RCODE, H_RCODEX, H_SEARCH, H_SEARCHRES, H_TOURNEXT, H_TOURSKIP, H_TOURBLOCK, H_NUDGE, H_LAYERSEL, H_SAFE, H_CB };
 enum { SL_SIZE, SL_THICK, SL_OPAC };
 enum { T_OUTLINE, T_HIDECUR, T_SPLASH, T_SHOW, T_OPENSTART, T_GLOW, T_CLICK, T_GPU, T_REPORTS, T_AUTOUPD, T_NOCAP, T_AUTOSTART, T_STATS, T_TBUILDS, T_AUTOCON, T_MENUHIDE };
 enum { B_SHOWKEYS, B_RBX, B_EXIT, B_REPORT, B_UPDATE, B_UNINSTALL, B_COPYCODE, B_PASTECODE, B_TESTOK, B_TESTBAD, B_DEBUG, B_EXPORT, B_IMPORT };
@@ -7233,6 +7306,7 @@ static const Tip TIPS[] = {
     {L"Loading screen", L"The short intro that plays when the app starts. It matches your theme."},
     {L"Loading music", L"Music that plays with the loading screen. Pick a file or turn it off."},
     {L"Fine-tune position", L"Leave it at 0 / 0 for the normal position. If a game's aim point sits a little off, + X moves the crosshair right and + Y moves it down."},
+    {L"Colorblind mode", L"Pick your type and the colors that are hard to see get faded, and your crosshair switches to one that stands out (with the dark edge on). Red-green suits deuteranopia/protanopia, blue-yellow suits tritanopia."},
     {L"Auto-contrast", L"Watches the spot behind your crosshair. If your color would blend in (red on red walls, white on snow), it turns white or black until it's visible again. Doesn't work with Rainbow."},
     {L"Hide in Roblox menus & chat", L"Hides the crosshair while Roblox's Esc menu is open or while you type in chat (after pressing /). It comes back when you close them."},
     {L"Q/A tester", L"You get test builds before everyone else. Tell simplysoul how they work with Looks good or Problem."},
@@ -7259,6 +7333,7 @@ static const SearchItem SEARCH[] = {
     {TAB_FX, L"Click reaction", L"click shoot fire recoil kick"},
     {TAB_FX, L"Hide in Roblox menus & chat", L"esc menu pause chat typing hide"},
     {TAB_COLOR, L"Auto-contrast", L"visible blend contrast background auto color"},
+    {TAB_COLOR, L"Colorblind mode", L"colorblind color blind deuteranopia protanopia tritanopia red green blue yellow accessibility"},
     {TAB_CROSSHAIR, L"Layer 2", L"layer second stack combine two crosshairs dot circle"},
     {TAB_FX, L"Hide from recordings", L"obs stream record capture screenshot steelseries clip discord"},
     {TAB_THEME, L"Themes", L"theme skin dark light background art colors look"},
@@ -7460,26 +7535,15 @@ static void pick_custom_color(void) {
 }
 
 /* ---- widgets ---- */
-/* HUD corner brackets: the "targeting frame" look on selected / featured cards. */
-static void hud_corners(float x0, float y0, float x1, float y1, float L, COLORREF c, float a) {
-    float t = dpf(2);
-    p_rrect(x0, y0, x0 + L, y0 + t, 0, 0, c, a); p_rrect(x0, y0, x0 + t, y0 + L, 0, 0, c, a);
-    p_rrect(x1 - L, y0, x1, y0 + t, 0, 0, c, a); p_rrect(x1 - t, y0, x1, y0 + L, 0, 0, c, a);
-    p_rrect(x0, y1 - t, x0 + L, y1, 0, 0, c, a); p_rrect(x0, y1 - L, x0 + t, y1, 0, 0, c, a);
-    p_rrect(x1 - L, y1 - t, x1, y1, 0, 0, c, a); p_rrect(x1 - t, y1 - L, x1, y1, 0, 0, c, a);
-}
 /* soft accent glow around a box */
 static void glow_box(float x0, float y0, float x1, float y1, float a) {
-    p_rrect(x0 - dpf(6), y0 - dpf(6), x1 + dpf(6), y1 + dpf(6), dpf(10), 0, C_ACCENT, a * 0.45f);
-    p_rrect(x0 - dpf(3), y0 - dpf(3), x1 + dpf(3), y1 + dpf(3), dpf(7), 0, C_ACCENT, a);
+    (void)x0; (void)y0; (void)x1; (void)y1; (void)a;
 }
 
 static void draw_toggle(int x1, int cy, int on, int kind, int val) {
     int w = dpx(44), hh = dpx(24), x0 = x1 - w, y0 = cy - hh / 2, hv = hov(kind, val);
-    if (on) p_rrect((float)x0 - dpf(4), (float)y0 - dpf(4), (float)(x0 + w) + dpf(4), (float)(y0 + hh) + dpf(4), hh / 2.0f + dpf(4), 0, C_ACCENT, hv ? 0.24f : 0.13f);
     p_rrect((float)x0, (float)y0, (float)(x0 + w), (float)(y0 + hh), hh / 2.0f, 0, on ? C_ACCENT : C_TRACK, 1);
     float kx = on ? x0 + w - hh / 2.0f : x0 + hh / 2.0f;
-    if (hv) p_circle(kx, (float)cy, hh / 2.0f + dpf(5), 0, on ? C_ACCENT : C_TEXT, 0.15f);
     p_circle(kx, (float)cy, hh / 2.0f - dpf(3), 0, on ? C_ONACC : lerpc(C_MUTED, C_TEXT, 0.4f), 1);
     hit(x0 - dpx(4), y0 - dpx(4), x0 + w + dpx(4), y0 + hh + dpx(4), kind, val);
 }
@@ -7507,11 +7571,10 @@ static void draw_segmented(int x0, int y0, int x1, int y1, const wchar_t **label
     for (int i = 0; i < n; i++) {
         int a = x0 + i * sw + dpx(3), b = (i == n - 1 ? x1 : x0 + (i + 1) * sw) - dpx(3);
         if (i == sel) {
-            p_rrect((float)a - dpf(2), (float)(y0 + dpx(1)), (float)b + dpf(2), (float)(y1 - dpx(1)), dpf(7), 0, C_ACCENT, 0.18f);
-            p_rrect((float)a, (float)(y0 + dpx(3)), (float)b, (float)(y1 - dpx(3)), dpf(7), 0, C_ACCENT, 1);
+            p_rrect((float)a, (float)(y0 + dpx(3)), (float)b, (float)(y1 - dpx(3)), dpf(6), 0, lerpc(C_CARD, C_TEXT, 0.14f), 1);
         }
         else if (hov(kind, i)) p_rrect((float)a, (float)(y0 + dpx(3)), (float)b, (float)(y1 - dpx(3)), dpf(7), 0, C_HOVER, 1);
-        q_text(a, y0, b, y1, labels[i], i == sel ? F_BOLD : F_TEXT, i == sel ? C_ONACC : C_MUTED, DT_CENTER);
+        q_text(a, y0, b, y1, labels[i], i == sel ? F_BOLD : F_TEXT, i == sel ? C_TEXT : C_MUTED, DT_CENTER);
         hit(a, y0, b, y1, kind, i);
     }
 }
@@ -7528,7 +7591,6 @@ static void draw_slider(int x0, int x1, int y, const wchar_t *label, const wchar
         float tx = x0 + (x1 - x0) * (float)i / (float)(count - 1);
         p_circle(tx, ty + dpf(12), dpf(1.5f), 0, i <= pos ? lerpc(C_ACCENT, C_CARD, 0.4f) : C_DIM, 1);
     }
-    p_rrect((float)x0, ty - dpf(4), kx, ty + dpf(4), dpf(4), 0, C_ACCENT, 0.18f); /* glow on the filled part */
     if (hov(H_SLIDER, id) || g_drag == id) p_circle(kx, ty, dpf(14), 0, C_ACCENT, 0.22f);
     p_circle(kx, ty, dpf(8), 0, theme_is_light() ? C_ACCENT : C_WHITE, 1);
     SetRect(&g_slider_track[id], x0, 0, x1, 0);
@@ -7630,26 +7692,12 @@ static void tab_crosshair(int cx0, int top, int cx1) {
         int x = cx0 + (slot % cols) * (tw + gap), y = top + (slot / cols) * (th + gap);
         slot++;
         int sel = i == (g_edit_l2 ? S.l2_style : S.style), h = hov(H_STYLE, i);
-        p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(12), 0, h ? C_HOVER : C_CARD, 1);
-        if (sel) {
-            p_rrect((float)x - dpf(5), (float)y - dpf(5), (float)(x + tw) + dpf(5), (float)(y + th) + dpf(5), dpf(16), 0, C_ACCENT, 0.10f);
-            p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(12), 0, C_ACCENT, 0.10f);
-        }
-        p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(12), sel ? dpf(2) : 1, sel ? C_ACCENT : h ? lerpc(C_BORDER, C_TEXT, 0.15f) : C_BORDER, 1);
-        if (sel) {
-            float bx = (float)(x + tw - dpx(14)), by = (float)(y + dpx(14));
-            p_circle(bx, by, dpf(8), 0, C_ACCENT, 1);
-            p_line(bx - dpf(3.5f), by, bx - dpf(1), by + dpf(2.8f), dpf(1.6f), C_ONACC, 1);
-            p_line(bx - dpf(1), by + dpf(2.8f), bx + dpf(3.8f), by - dpf(2.6f), dpf(1.6f), C_ONACC, 1);
-        }
+        p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(8), 0, sel || h ? C_HOVER : C_CARD, sel || h ? 1.0f : 0.55f);
+        if (sel) p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(8), dpf(1.5f), C_ACCENT, 1);
         int n = dpx(58);
         p_crosshair(x + tw / 2.0f, (float)(y + dpx(36)), n, i, g_edit_l2 ? S.l2_color : S.color, n * 0.27f, dpx(2) < 2 ? 2 : dpx(2), S.outline, 1.0f);
         q_text(x + dpx(3), y + th - dpx(26), x + tw - dpx(3), y + th - dpx(8), STYLE_NAMES[i],
-               fitf(STYLE_NAMES[i], tw - dpx(6), F_SMALL, F_XS, F_TINY), sel ? C_TEXT : C_MUTED, DT_CENTER);
-        if (i >= 19) { /* little NEW tag on the v1.9 additions */
-            p_rrect((float)(x + dpx(6)), (float)(y + dpx(6)), (float)(x + dpx(36)), (float)(y + dpx(19)), dpf(6), 0, C_ACCENT, 0.9f);
-            q_text_ex(x + dpx(6), y + dpx(6), x + dpx(36), y + dpx(19), L"NEW", F_TINY, C_ONACC, DT_CENTER, 0);
-        }
+               fitf(STYLE_NAMES[i], tw - dpx(6), F_SMALL, F_XS, F_XS), sel ? C_TEXT : C_MUTED, DT_CENTER);
         hit(x, y, x + tw, y + th, H_STYLE, i);
         if (g_edit_l2 && slot == NSTYLES_SHOWN_LAST) { /* layer 2: a "None" tile in the free slot */
             int x2 = cx0 + (slot % cols) * (tw + gap), y2 = top + (slot / cols) * (th + gap), s2 = S.l2_style < 0, h2 = hov(H_STYLE, -1);
@@ -7672,13 +7720,25 @@ static void color_dot(float x, float y, float R, int i, int sel, int h) {
 }
 
 static void setting_row(int x0, int y, int x1, int ctrl_w, const wchar_t *title, const wchar_t *sub, int hk, int hv);
+/* Colors that are hard to tell apart (from each other and from a green/brown map) for each kind of colorblindness. */
+static int cb_hard(int i) {
+    static const unsigned char RG[] = {1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0}; /* red, green, orange, lime, teal, gold, coral */
+    static const unsigned char BY[] = {0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0}; /* cyan, yellow, blue, purple, lime, sky blue, teal, mint, lavender */
+    if (i < 0 || i >= CUSTOM_COLOR) return 0;
+    if (g_cb == 1) return RG[i];
+    if (g_cb == 2) return BY[i];
+    if (g_cb == 3) return i != 5 && i != 17; /* only white and black stand out without color */
+    return 0;
+}
 static void tab_color(int cx0, int top, int cx1) {
     int cols = 6, cw = (cx1 - cx0) / cols, ch = dpx(84);
     for (int i = 0; i < CUSTOM_COLOR; i++) {
         float x = cx0 + (i % cols) * cw + cw / 2.0f, y = (float)(top + (i / cols) * ch + dpx(26));
         int sel = i == (g_edit_l2 ? S.l2_color : S.color);
         color_dot(x, y, dpf(18), i, sel, hov(H_COLOR, i));
-        q_text((int)x - cw / 2, (int)y + dpx(28), (int)x + cw / 2, (int)y + dpx(46), COLORS[i].name, F_SMALL, sel ? C_TEXT : C_MUTED, DT_CENTER);
+        int hard = cb_hard(i);
+        if (hard && !sel) p_circle(x, y, dpf(19), 0, C_BG, 0.62f); /* hard to see for this player: faded */
+        q_text((int)x - cw / 2, (int)y + dpx(28), (int)x + cw / 2, (int)y + dpx(46), COLORS[i].name, F_SMALL, sel ? C_TEXT : hard ? C_DIM : C_MUTED, DT_CENTER);
         hit((int)x - cw / 2 + dpx(4), (int)y - dpx(28), (int)x + cw / 2 - dpx(4), (int)y + dpx(48), H_COLOR, i);
     }
     int y0 = top + 3 * ch + dpx(10), y1 = y0 + dpx(72);
@@ -7687,20 +7747,26 @@ static void tab_color(int cx0, int top, int cx1) {
     p_rrect((float)cx0, (float)y0, (float)cx1, (float)y1, dpf(14), sel ? dpf(2) : 1, sel ? C_ACCENT : C_BORDER, 1);
     color_dot((float)(cx0 + dpx(40)), (y0 + y1) / 2.0f, dpf(18), CUSTOM_COLOR, 0, 0);
     wchar_t hex[64];
-    wsprintfW(hex, L"#%02X%02X%02X  \x2022  %s", COLORS[CUSTOM_COLOR].r, COLORS[CUSTOM_COLOR].g,
+    wsprintfW(hex, L"#%02X%02X%02X, %s", COLORS[CUSTOM_COLOR].r, COLORS[CUSTOM_COLOR].g,
               COLORS[CUSTOM_COLOR].b, sel ? L"in use" : L"click to use");
     q_text(cx0 + dpx(74), y0 + dpx(14), cx1 - dpx(190), y0 + dpx(36), L"Custom color", F_BOLD, C_TEXT, DT_LEFT);
     q_text(cx0 + dpx(74), y0 + dpx(36), cx1 - dpx(190), y0 + dpx(58), hex, F_SMALL, C_MUTED, DT_LEFT);
     hit(cx0, y0, cx1 - dpx(180), y1, H_COLOR, CUSTOM_COLOR);
-    draw_button(cx1 - dpx(170), y0 + dpx(18), cx1 - dpx(18), y1 - dpx(18), L"Pick a color...", H_PICK, 0, 1);
+    draw_button(cx1 - dpx(170), y0 + dpx(18), cx1 - dpx(18), y1 - dpx(18), L"Pick a color...", H_PICK, 0, 0);
     { /* auto-contrast */
         int y = y1 + dpx(14);
         hit(cx0, y, cx1, y + dpx(64), H_TOGGLE, T_AUTOCON);
         setting_row(cx0, y, cx1, dpx(90), L"Auto-contrast",
-                    S.auto_contrast && g_ac_alt ? (g_ac_alt == 1 ? L"Switched to white right now \x2014 your color would blend in"
-                                                                 : L"Switched to black right now \x2014 your color would blend in")
-                                                : L"Turns white or black when your color would blend into the map", H_TOGGLE, T_AUTOCON);
+                    S.auto_contrast && g_ac_alt ? (g_ac_alt == 1 ? L"Using white right now"
+                                                                 : L"Using black right now")
+                                                : L"Switches to white or black if it blends in", H_TOGGLE, T_AUTOCON);
         draw_toggle(cx1 - dpx(18), y + dpx(32), S.auto_contrast, H_TOGGLE, T_AUTOCON);
+    }
+    { /* colorblind mode */
+        int y = y1 + dpx(14) + dpx(70);
+        static const wchar_t *CB[] = {L"Off", L"Red-green", L"Blue-yellow", L"No color"};
+        setting_row(cx0, y, cx1, dpx(400), L"Colorblind mode", g_cb ? L"Faded colors are hard to see" : L"Fades colors that are hard to see", H_CB, 99);
+        draw_segmented(cx1 - dpx(392), y + dpx(14), cx1 - dpx(4), y + dpx(50), CB, 4, g_cb, H_CB);
     }
 }
 
@@ -7722,10 +7788,6 @@ static void draw_preview(int x0, int y0, int x1, int y1) {
     p_rrect(x0 + w * 0.60f, (float)(horizon - dpx(110)), x0 + w * 0.79f, (float)horizon, dpf(3), 0, RGB(54, 62, 80), 1);
     p_rrect(x0 + w * 0.79f, (float)(horizon - dpx(48)), x0 + w * 0.94f, (float)horizon, dpf(3), 0, RGB(70, 80, 100), 1);
     p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(14), 1, C_BORDER, 1);
-    hud_corners((float)x0 - dpf(4), (float)y0 - dpf(4), (float)x1 + dpf(4), (float)y1 + dpf(4), dpf(14), C_ACCENT, 1);
-    p_rrect((float)(x0 + dpx(10)), (float)(y0 + dpx(10)), (float)(x0 + dpx(118)), (float)(y0 + dpx(30)), dpf(3), 0, RGB(0, 0, 0), 0.5f);
-    p_circle((float)(x0 + dpx(20)), (float)(y0 + dpx(20)), dpf(3), 0, RGB(255, 70, 70), 0.95f);
-    q_text_ex(x0 + dpx(28), y0 + dpx(10), x0 + dpx(118), y0 + dpx(30), L"LIVE PREVIEW", F_TINY, C_WHITE, DT_LEFT, 1);
     if (S.cover)
         p_circle(cx, cy, (float)COVER_RADII[S.cover], 0,
                  RGB(COVER_COLORS[S.cover_color].r, COVER_COLORS[S.cover_color].g, COVER_COLORS[S.cover_color].b), 1);
@@ -7736,7 +7798,7 @@ static void draw_preview(int x0, int y0, int x1, int y1) {
                 OPACITIES[S.opacity] / 100.0f * om);
     if (S.l2_style >= 0)
         p_crosshair(cx, cy, n, S.l2_style, S.l2_color, (float)SIZES[S.l2_size] * fx_scale(), S.thick, S.outline, OPACITIES[S.opacity] / 100.0f * om);
-    q_text(x0, y1 + dpx(8), x1, y1 + dpx(28), L"Real size  \x2022  click it to test", F_SMALL, C_DIM, DT_CENTER);
+    q_text(x0, y1 + dpx(8), x1, y1 + dpx(28), L"Actual size. Click to test.", F_SMALL, C_DIM, DT_CENTER);
     hit(x0, y0, x1, y1, H_PREVIEW, 0);
 }
 
@@ -7757,14 +7819,14 @@ static void tab_look(int cx0, int top, int cx1) {
 
     int y = top + dpx(196);
     q_text(cx0, y, lx1, y + dpx(22), L"Outline", F_TEXT, C_TEXT, DT_LEFT);
-    q_text(cx0, y + dpx(21), lx1 - dpx(60), y + dpx(40), L"Edge that keeps it visible on any background", F_SMALL, C_MUTED, DT_LEFT);
+    q_text(cx0, y + dpx(21), lx1 - dpx(60), y + dpx(40), L"Dark edge around it", F_SMALL, C_MUTED, DT_LEFT);
     hit(cx0, y, lx1, y + dpx(42), H_TOGGLE, T_OUTLINE);
     draw_toggle(lx1, y + dpx(20), S.outline, H_TOGGLE, T_OUTLINE);
 
     y = top + dpx(258);
     q_text(cx0, y, lx1, y + dpx(22), L"Cover game crosshair", F_TEXT, C_TEXT, DT_LEFT);
     key_text(KB[A_COVER], k);
-    wsprintfW(v, L"Solid patch behind yours  \x2022  %s", KB[A_COVER].vk ? k : L"no key");
+    wsprintfW(v, L"Patch behind yours (%s)", KB[A_COVER].vk ? k : L"no key");
     q_text(cx0, y + dpx(21), lx1, y + dpx(40), v, F_SMALL, C_MUTED, DT_LEFT);
     static const wchar_t *SEG[] = {L"Off", L"S", L"M", L"L", L"XL"};
     int sy0 = y + dpx(50), sy1 = sy0 + dpx(34);
@@ -7784,8 +7846,8 @@ static void tab_look(int cx0, int top, int cx1) {
         int ny = py + dpx(34);
         tip_row(cx0, ny, lx1, ny + dpx(44), L"Fine-tune position");
         q_text(cx0, ny, lx1, ny + dpx(22), L"Fine-tune position", F_TEXT, C_TEXT, DT_LEFT);
-        q_text(cx0, ny + dpx(21), lx1 - dpx(330), ny + dpx(40), L"Line it up with a game's own aim point",
-               fitf(L"Line it up with a game's own aim point", lx1 - dpx(330) - cx0, F_SMALL, F_XS, F_XS), C_MUTED, DT_LEFT);
+        q_text(cx0, ny + dpx(21), lx1 - dpx(330), ny + dpx(40), L"Move it a few pixels",
+               fitf(L"Move it a few pixels", lx1 - dpx(330) - cx0, F_SMALL, F_XS, F_XS), C_MUTED, DT_LEFT);
         int bx = lx1 - dpx(318), by = ny + dpx(4), bs = dpx(30);
         for (int a = 0; a < 2; a++) { /* X then Y: [-] value [+] */
             int x0 = bx + a * dpx(136), vv = a ? g_nudge_y : g_nudge_x;
@@ -7822,11 +7884,11 @@ static void toggle_line(int cx0, int lx1, int y, const wchar_t *title, const wch
 
 static void tab_fx(int cx0, int top, int cx1) {
     int lx1 = cx1, y = top;
-    toggle_line(cx0, lx1, y, L"Glow", L"Soft neon halo around your crosshair", S.glow, T_GLOW);
+    toggle_line(cx0, lx1, y, L"Glow", L"Adds a soft glow", S.glow, T_GLOW);
     y += dpx(66);
     tip_row(cx0, y, lx1, y + dpx(86), L"Color effect");
     q_text(cx0, y, lx1, y + dpx(22), L"Color effect", F_TEXT, C_TEXT, DT_LEFT);
-    q_text(cx0, y + dpx(21), lx1, y + dpx(40), L"Rainbow cycles colors, Pulse breathes in and out", F_SMALL, C_MUTED, DT_LEFT);
+    q_text(cx0, y + dpx(21), lx1, y + dpx(40), L"Animate the color", F_SMALL, C_MUTED, DT_LEFT);
     static const wchar_t *FX[] = {L"Off", L"Rainbow", L"Pulse"};
     draw_segmented(cx0, y + dpx(48), lx1, y + dpx(82), FX, 3, S.anim, H_FXSEG);
     y += dpx(104);
@@ -7835,11 +7897,11 @@ static void tab_fx(int cx0, int top, int cx1) {
     static const wchar_t *SP[] = {L"Slow", L"Medium", L"Fast"};
     draw_segmented(cx0, y + dpx(28), lx1, y + dpx(62), SP, 3, S.anim_speed, H_SPEED);
     y += dpx(86);
-    toggle_line(cx0, lx1, y, L"Click reaction", L"Your crosshair kicks out when you click", S.click_fx, T_CLICK);
+    toggle_line(cx0, lx1, y, L"Click reaction", L"Spreads a bit when you click", S.click_fx, T_CLICK);
     y += dpx(60);
-    toggle_line(cx0, lx1, y, L"Hide from recordings", L"Clips, streams & screenshots won't show it", g_nocap, T_NOCAP);
+    toggle_line(cx0, lx1, y, L"Hide from recordings", L"Won't show up in clips or streams", g_nocap, T_NOCAP);
     y += dpx(60);
-    toggle_line(cx0, lx1, y, L"Hide in Roblox menus & chat", L"Gone while the Esc menu or the chat box is open", S.menu_hide, T_MENUHIDE);
+    toggle_line(cx0, lx1, y, L"Hide in Roblox menus & chat", L"Hides while Esc or chat is open", S.menu_hide, T_MENUHIDE);
 }
 
 static void setting_row(int x0, int y, int x1, int ctrl_w, const wchar_t *title, const wchar_t *sub, int hk, int hv);
@@ -7852,14 +7914,14 @@ static void tab_profiles(int cx0, int top, int cx1) {
         int x0 = cx0 + p * (cw + gap), x1 = x0 + cw, y0 = top, y1 = top + ch;
         int inuse = profile_in_use(p);
         p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(14), 0, C_CARD, 1);
-        p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(14), inuse ? dpf(2) : 1, inuse ? C_ACCENT : C_BORDER, 1);
+        p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(8), inuse ? dpf(1.5f) : 1, inuse ? C_ACCENT : C_BORDER, 1);
         wsprintfW(t, L"Profile %d", p + 1);
         q_text(x0 + dpx(16), y0 + dpx(14), x1 - dpx(70), y0 + dpx(36), t, F_BOLD, C_TEXT, DT_LEFT);
         if (inuse) {
-            p_rrect((float)(x1 - dpx(70)), (float)(y0 + dpx(15)), (float)(x1 - dpx(14)), (float)(y0 + dpx(35)), dpf(10), 0, C_ACCENT, 1);
-            q_text_ex(x1 - dpx(70), y0 + dpx(15), x1 - dpx(14), y0 + dpx(35), L"IN USE", F_TINY, C_ONACC, DT_CENTER, 1);
+            q_text(x1 - dpx(80), y0 + dpx(14), x1 - dpx(16), y0 + dpx(36), L"In use", F_SMALL, C_ACCLT, DT_RIGHT);
         }
-        key_hint(sub, pr->saved ? L"Saved" : L"Empty slot", A_PROF1 + p);
+        sub[0] = 0;
+        if (KB[A_PROF1 + p].vk) key_text(KB[A_PROF1 + p], sub);
         q_text(x0 + dpx(16), y0 + dpx(34), x1 - dpx(14), y0 + dpx(52), sub, F_SMALL, C_MUTED, DT_LEFT);
         int bx0 = x0 + dpx(14), bx1 = x1 - dpx(14), by0 = y0 + dpx(58), by1 = y0 + dpx(128);
         p_rrect((float)bx0, (float)by0, (float)bx1, (float)by1, dpf(10), 0, C_BG, 1);
@@ -7879,14 +7941,12 @@ static void tab_profiles(int cx0, int top, int cx1) {
             p_crosshair(pcx, pcy, n, pr->style, col, L, pr->thick, pr->outline, OPACITIES[pr->opacity] / 100.0f);
             S.glow = keep;
             q_text(x0 + dpx(16), y0 + dpx(134), x1 - dpx(14), y0 + dpx(154), STYLE_NAMES[pr->style], F_BOLD, C_TEXT, DT_LEFT);
-            wsprintfW(sub, L"%s  \x2022  %d px%s%s%s", COLORS[pr->color].name, SIZES[pr->size],
-                      pr->glow ? L"  \x2022  Glow" : L"", pr->anim == 1 ? L"  \x2022  Rainbow" : pr->anim == 2 ? L"  \x2022  Pulse" : L"",
-                      pr->click_fx ? L"  \x2022  Click" : L"");
+            wsprintfW(sub, L"%s, %d px%s%s%s", COLORS[pr->color].name, SIZES[pr->size],
+                      pr->glow ? L", glow" : L"", pr->anim == 1 ? L", rainbow" : pr->anim == 2 ? L", pulse" : L"",
+                      pr->click_fx ? L", click" : L"");
             q_text(x0 + dpx(16), y0 + dpx(153), x1 - dpx(14), y0 + dpx(171), sub, fitf(sub, x1 - x0 - dpx(30), F_SMALL, F_XS, F_XS), C_MUTED, DT_LEFT | DT_END_ELLIPSIS);
         } else {
             q_text(bx0, by0, bx1, by1, L"Empty", F_SMALL, C_DIM, DT_CENTER);
-            q_text(x0 + dpx(16), y0 + dpx(140), x1 - dpx(14), y0 + dpx(170), L"Save your current setup here",
-                   F_SMALL, C_MUTED, DT_LEFT | DT_WORDBREAK);
         }
         int b0 = y1 - dpx(48), bm = (x0 + x1) / 2;
         if (pr->saved) {
@@ -7900,12 +7960,12 @@ static void tab_profiles(int cx0, int top, int cx1) {
         xh_code(code);
         wsprintfW(sub2, L"Your code: %s", code);
         setting_row(cx0, y, cx1, dpx(300), L"Share your crosshair", sub2, 0, 0);
-        draw_button(cx1 - dpx(292), y + dpx(14), cx1 - dpx(158), y + dpx(50), L"Copy code", H_BUTTON, B_COPYCODE, 1);
+        draw_button(cx1 - dpx(292), y + dpx(14), cx1 - dpx(158), y + dpx(50), L"Copy code", H_BUTTON, B_COPYCODE, 0);
         draw_button(cx1 - dpx(150), y + dpx(14), cx1 - dpx(16), y + dpx(50), L"Paste code", H_BUTTON, B_PASTECODE, 0);
     }
     { /* recent codes: one click to switch back to a friend's crosshair */
         int y = top + ch + dpx(92);
-        q_text_ex(cx0 + dpx(2), y, cx1, y + dpx(18), L"RECENT CODES", F_TINY, C_DIM, DT_LEFT, 1);
+        q_text_ex(cx0 + dpx(2), y, cx1, y + dpx(18), L"Recent codes", F_SMALL, C_DIM, DT_LEFT, 0);
         y += dpx(22);
         int cg = dpx(8), cols = 5, chw = (cx1 - cx0 - cg * (cols - 1)) / cols, chh = dpx(46);
         wchar_t cur[32];
@@ -8011,15 +8071,14 @@ static void tab_keys(int cx0, int top, int cx1, int bottom) {
     draw_button(cx0, bottom + dpx(14), cx0 + dpx(160), bottom + dpx(48), L"Reset to defaults", H_KRESET, 0, 0);
     draw_button(cx0 + dpx(170), bottom + dpx(14), cx0 + dpx(330), bottom + dpx(48), L"Use F-key layout", H_KFKEY, 0, 0);
     q_text(cx0 + dpx(346), bottom + dpx(14), cx1, bottom + dpx(48),
-           L"Backspace removes  \x2022  Esc cancels", F_SMALL, C_DIM, DT_LEFT);
+           L"Backspace clears a key, Esc cancels", F_SMALL, C_DIM, DT_LEFT);
 }
 
 static void setting_row(int x0, int y0, int x1, int ctrl_w, const wchar_t *title, const wchar_t *sub, int kind, int val) {
     int y1 = y0 + dpx(64);
     int hv = kind && hov(kind, val);
-    p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(12), 0, hv ? C_HOVER : C_CARD, 1);
-    p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(12), 1, C_BORDER, 1);
-    p_rrect((float)x0, (float)(y0 + dpx(16)), (float)(x0 + dpx(3)), (float)(y1 - dpx(16)), 0, 0, C_ACCENT, hv ? 1.0f : 0.6f); /* HUD tick */
+    if (hv) p_rrect((float)x0, (float)y0 + dpf(2), (float)x1, (float)y1 - dpf(2), dpf(6), 0, C_HOVER, 0.6f);
+    p_fill(x0 + dpx(4), y1 - 1, x1 - dpx(4), y1, lerpc(C_BORDER, C_BG, 0.3f));
     tip_row(x0, y0, x1, y1, title);
     q_text(x0 + dpx(18), y0 + dpx(12), x1 - ctrl_w, y0 + dpx(34), title, fitf(title, x1 - ctrl_w - x0 - dpx(20), F_BOLD, F_TEXT, F_SMALL), C_TEXT, DT_LEFT);
     q_text(x0 + dpx(18), y0 + dpx(33), x1 - ctrl_w, y0 + dpx(53), sub, fitf(sub, x1 - ctrl_w - x0 - dpx(20), F_SMALL, F_XS, F_XS), C_MUTED, DT_LEFT);
@@ -8027,7 +8086,7 @@ static void setting_row(int x0, int y0, int x1, int ctrl_w, const wchar_t *title
 
 static void key_hint(wchar_t *out, const wchar_t *text, int a) {
     wchar_t k[64];
-    if (KB[a].vk) { key_text(KB[a], k); wsprintfW(out, L"%s  \x2022  %s", text, k); }
+    if (KB[a].vk) { key_text(KB[a], k); wsprintfW(out, L"%s (%s)", text, k); }
     else wcscpy(out, text);
 }
 
@@ -8083,7 +8142,6 @@ static void tab_theme(int cx0, int top, int cx1) {
         Theme tt;
         theme_get(i, &tt);
         p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(12), 0, h ? C_HOVER : C_CARD, 1);
-        if (sel) p_rrect((float)x - dpf(5), (float)y - dpf(5), (float)(x + tw) + dpf(5), (float)(y + th) + dpf(5), dpf(16), 0, C_ACCENT, 0.10f);
         theme_mini(i, x + dpx(6), y + dpx(6), x + tw - dpx(6), y + dpx(62));
         p_rrect((float)x, (float)y, (float)(x + tw), (float)(y + th), dpf(12), sel ? dpf(2) : 1,
                 sel ? C_ACCENT : h ? lerpc(C_BORDER, C_TEXT, 0.15f) : C_BORDER, 1);
@@ -8099,7 +8157,7 @@ static void tab_theme(int cx0, int top, int cx1) {
     }
     int y = top + 3 * (th + gap) - dpx(2);
     {
-        setting_row(cx0, y, cx1, dpx(300), L"Custom colors", L"Pick an accent and a background for the Custom theme", 0, 0);
+        setting_row(cx0, y, cx1, dpx(300), L"Custom colors", L"Accent and background", 0, 0);
     }
     static const wchar_t *LBL[2] = {L"Accent", L"Background"};
     COLORREF sw[2] = {g_cust_accent, g_cust_bg};
@@ -8120,16 +8178,16 @@ static void tab_theme(int cx0, int top, int cx1) {
         setting_row(cx0, y, cx1, dpx(510), L"Loading screen", L"Crew ranks or wanted level", H_TOGGLE, T_SPLASH);
         draw_segmented(cx1 - dpx(488), y + dpx(15), cx1 - dpx(318), y + dpx(49), CI, 2, g_crim_intro, H_CRIMINTRO);
     } else
-        setting_row(cx0, y, cx1, dpx(320), L"Loading screen", S.splash ? L"Plays when the app starts, in your theme" : L"Off \x2014 you can still preview it", H_TOGGLE, T_SPLASH);
-    draw_button(cx1 - dpx(300), y + dpx(14), cx1 - dpx(84), y + dpx(50), L"Preview loading screen", H_SPLASHPREV, 0, 1);
+        setting_row(cx0, y, cx1, dpx(320), L"Loading screen", S.splash ? L"Plays when the app starts" : L"Off", H_TOGGLE, T_SPLASH);
+    draw_button(cx1 - dpx(300), y + dpx(14), cx1 - dpx(84), y + dpx(50), L"Preview loading screen", H_SPLASHPREV, 0, 0);
     draw_toggle(cx1 - dpx(18), y + dpx(32), S.splash, H_TOGGLE, T_SPLASH);
     y += dpx(70);
     { /* loading music: song file + start time */
         wchar_t sub2[MAX_PATH + 40], st[16];
         const wchar_t *nm = g_music[0] ? wcsrchr(g_music, L'\\') : NULL;
         nm = nm ? nm + 1 : g_music;
-        if (g_music[0]) wsprintfW(sub2, L"%s  \x2022  starts at %d:%02d", nm, g_music_start / 60, g_music_start % 60);
-        else wcscpy(sub2, L"Off \x2014 pick a song file on your PC to play during the intro");
+        if (g_music[0]) wsprintfW(sub2, L"%s from %d:%02d", nm, g_music_start / 60, g_music_start % 60);
+        else wcscpy(sub2, L"Off");
         setting_row(cx0, y, cx1, dpx(370), L"Loading music", sub2, 0, 0);
         int bx = cx1 - dpx(356), by0 = y + dpx(14), by1 = y + dpx(50);
         if (g_music[0]) {
@@ -8155,7 +8213,7 @@ static void tab_perf(int cx0, int top, int cx1) {
     y += dpx(106);
     tip_row(cx0, y, cx1, y + dpx(90), L"Performance boost");
     q_text(cx0, y, cx1, y + dpx(22), L"Performance boost", F_TEXT, C_TEXT, DT_LEFT);
-    q_text(cx0, y + dpx(21), cx1, y + dpx(40), L"Uses graphics settings Roblox officially allows \x2014 less detail, more FPS", F_SMALL, C_MUTED, DT_LEFT);
+    q_text(cx0, y + dpx(21), cx1, y + dpx(40), L"Lower graphics for more FPS. Only uses settings Roblox allows.", F_SMALL, C_MUTED, DT_LEFT);
     static const wchar_t *BOOST[] = {L"Off", L"Balanced", L"Max FPS"};
     draw_segmented(cx0, y + dpx(48), cx0 + dpx(400), y + dpx(84), BOOST, 3, g_boost, H_BOOST);
     static const wchar_t *BDESC[] = {
@@ -8166,18 +8224,16 @@ static void tab_perf(int cx0, int top, int cx1) {
     y += dpx(144);
     hit(cx0, y, cx1, y + dpx(64), H_TOGGLE, T_GPU);
     setting_row(cx0, y, cx1, dpx(90), L"Use high-performance graphics card",
-                L"For laptops with two GPUs: tells Windows to run Roblox on the faster one", H_TOGGLE, T_GPU);
+                L"For laptops with two GPUs", H_TOGGLE, T_GPU);
     draw_toggle(cx1 - dpx(18), y + dpx(32), g_gpu, H_TOGGLE, T_GPU);
     y += dpx(80);
     draw_button(cx0, y, cx0 + dpx(160), y + dpx(40), L"Apply now", H_PERFBTN, 0, 1);
     draw_button(cx0 + dpx(172), y, cx0 + dpx(372), y + dpx(40), L"Undo all FPS changes", H_PERFBTN, 1, 2);
     y += dpx(56);
     static const wchar_t *NOTE[] = {
-        L"Changes take effect the next time Roblox starts.",
-        L"The FPS cap is only written while Roblox is closed \x2014 if it's open, the app sets it the moment you close it.",
-        L"240 is the highest cap Roblox supports. Stuck on a white screen? Close Roblox and click Undo all FPS changes.",
-        L"Only Roblox's own settings files are changed \x2014 never the game itself, so it's safe with Roblox's anti-cheat."};
-    for (int i = 0; i < 4; i++) q_text(cx0, y + i * dpx(19), cx1, y + (i + 1) * dpx(19), NOTE[i], F_SMALL, C_DIM, DT_LEFT);
+        L"Applies next time Roblox starts.",
+        L"White screen or odd graphics? Close Roblox and click Undo all FPS changes."};
+    for (int i = 0; i < 2; i++) q_text(cx0, y + i * dpx(19), cx1, y + (i + 1) * dpx(19), NOTE[i], F_SMALL, C_DIM, DT_LEFT);
 }
 
 /* Ask once before the app first changes Roblox's own settings. 1 = go ahead. */
@@ -8199,13 +8255,13 @@ static void perf_report(int fps_res) {
     if (g_fps > 0) {
         if (fps_res == FPS_DONE || fps_res == FPS_SAME)
             wsprintfW(a, L"FPS cap set to %d.", FPS_CAPS[g_fps]);
-        else if (fps_res == FPS_RUNNING) wcscpy(a, L"Roblox is open \x2014 the FPS cap is set the moment you close it.");
+        else if (fps_res == FPS_RUNNING) wcscpy(a, L"Roblox is open. The FPS cap applies once you close it.");
         else if (fps_res == FPS_NOFILE) wcscpy(a, L"Open Roblox once (so it makes its settings file), close it, then try again.");
         else wcscpy(a, L"Couldn't write Roblox's settings file.");
     }
     if (g_boost || g_gpu) {
         if (!g_perf_installs) wcscpy(b, L"No Roblox install found for the boost.");
-        else if (g_boost_fail) wsprintfW(b, L"Boost failed in %d place(s) \x2014 try Run as administrator.", g_boost_fail);
+        else if (g_boost_fail) wsprintfW(b, L"Boost failed in %d place(s). Try running as administrator.", g_boost_fail);
         else wsprintfW(b, L"Boost applied to %d Roblox install(s).", g_perf_installs);
     }
     wsprintfW(m, L"%s %s %s", a, b, (a[0] || b[0]) ? L"Restart Roblox to use it." : L"Roblox FPS changes are off.");
@@ -8228,11 +8284,11 @@ static void stats_maybe_send(int force) {
     for (const wchar_t *c = g_report_id; *c; c++) hsh = (hsh ^ *c) * 16777619u;
     static const wchar_t *BOOST[] = {L"off", L"balanced", L"max FPS"};
     wsprintfW(line, L"\xD83D\xDCCA **Usage** \x2022 v" VER_WSTR L"%s \x2022 %s \x2022 %dx%d @ %d Hz \x2022 theme %s \x2022 %s \x2022 "
-                    L"panel %d%% \x2022 FPS cap %s, boost %s \x2022 %s \x2022 hide from recordings %s \x2022 user `%06x`",
+                    L"panel %d%% \x2022 FPS cap %s, boost %s \x2022 %s \x2022 hide from recordings %s \x2022 start %d.%d s \x2022 user `%06x`",
               g_is_tester ? L" (tester)" : L"", wcsstr(wv, L"Windows 11") ? L"Windows 11" : wcsstr(wv, L"Windows 10") ? L"Windows 10" : L"older Windows",
               GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), refresh_rate(), th, STYLE_NAMES[S.style],
               UI_SIZES[g_ui_size], FPS_LABELS[g_fps], BOOST[g_boost], g_onlyrbx ? L"Roblox only" : L"always shown",
-              g_nocap ? L"on" : L"off", hsh & 0xffffff);
+              g_nocap ? L"on" : L"off", (g_start_avg < 0 ? 0 : g_start_avg) / 1000, (g_start_avg < 0 ? 0 : g_start_avg) % 1000 / 100, hsh & 0xffffff);
     char u[1400], payload[2000];
     to_utf8(line, u, sizeof(u));
     strcpy(payload, "{\"username\":\"Crosshair Overlay stats\",\"content\":\"");
@@ -8284,12 +8340,14 @@ static wchar_t *debug_info_text(void) {
               L"Roblox: %s \x2022 FPS cap %s \x2022 boost %s\r\n"
               L"Crosshair: %s, %s, %d px, thickness %d%s \x2022 theme %s\r\n"
               L"Setup: %s \x2022 %s \x2022 cursor %s \x2022 recordings %s \x2022 auto-contrast %s \x2022 hide in menus %s\r\n"
+              L"Startup: %d ms (average %d ms)%s%s\r\n"
               L"Last problem: %s\r\n```",
               g_is_tester ? L" (Q/A tester)" : L"", g_report_id, wv, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), refresh_rate(),
               GetSystemMetrics(SM_CMONITORS), roblox_running() ? L"open" : L"closed", FPS_LABELS[g_fps], BOOST[g_boost],
               STYLE_NAMES[S.style], COLORS[S.color].name, SIZES[S.size], S.thick, l2, th,
               S.hidden ? L"hidden" : g_onlyrbx ? L"Roblox only" : L"always shown", S.center ? L"centered" : L"follows mouse",
               S.hidecur ? L"hidden" : L"shown", g_nocap ? L"hidden" : L"visible", S.auto_contrast ? L"on" : L"off", S.menu_hide ? L"on" : L"off",
+              g_start_ms, g_start_avg, g_safe ? L" \x2022 SAFE MODE" : L"", g_cb ? (g_cb == 1 ? L" \x2022 colorblind: red-green" : g_cb == 2 ? L" \x2022 colorblind: blue-yellow" : L" \x2022 colorblind: no color") : L"",
               last[0] ? last : L"none");
     return t;
 }
@@ -8297,7 +8355,8 @@ static wchar_t *debug_info_text(void) {
 /* ---- Backup / restore: every setting and profile in one file ---- */
 static int pc_only_key(const wchar_t *k) { /* things that belong to this PC, not to the player's setup */
     static const wchar_t *K[] = {L"report_id", L"was_tester", L"tester_ok", L"news_seen", L"news_dismissed", L"stats_day", L"stats_ver",
-                                 L"skip_update", L"tour_done", L"nudge_v", L"retired_flags_cleaned", L"last_tab", L"music_path"};
+                                 L"skip_update", L"tour_done", L"nudge_v", L"retired_flags_cleaned", L"last_tab", L"music_path",
+                                 L"startup_ms", L"startup_avg"};
     for (int i = 0; i < (int)(sizeof(K) / sizeof(K[0])); i++) if (!_wcsicmp(k, K[i])) return 1;
     return 0;
 }
@@ -8389,7 +8448,7 @@ static void settings_import(HWND owner) {
     scene_timer_sync();
     log_info(L"settings imported (%d settings)", keys);
     crumb(L"imported settings");
-    ui_set_status(L"Settings imported \x2014 everything from the backup is in use now.");
+    ui_set_status(L"Settings imported.");
     ui_redraw();
 }
 
@@ -8399,11 +8458,11 @@ static void tab_general(int cx0, int top, int cx1) {
     wchar_t sub[200];
     int y = top, step = dpx(66);
     static const wchar_t *MODES[] = {L"Follow mouse", L"Center"};
-    key_hint(sub, L"Follow your mouse, or stay in the middle of the game", A_MODE);
+    key_hint(sub, L"Mouse or screen center", A_MODE);
     setting_row(cx0, y, cx1, dpx(290), L"Crosshair position", sub, 0, 0);
     draw_segmented(cx1 - dpx(262), y + dpx(15), cx1 - dpx(16), y + dpx(49), MODES, 2, S.center, H_MODE);
     y += step;
-    key_hint(sub, g_onlyrbx ? L"Only while Roblox is in front \x2014 hides when you alt-tab" : L"Turn the overlay on or off", A_HIDE);
+    key_hint(sub, g_onlyrbx ? L"Only while Roblox is focused" : L"On or off", A_HIDE);
     hit(cx0, y, cx1 - dpx(330), y + dpx(64), H_TOGGLE, T_SHOW);
     setting_row(cx0, y, cx1, dpx(330), L"Show crosshair", sub, H_TOGGLE, T_SHOW);
     {
@@ -8412,22 +8471,22 @@ static void tab_general(int cx0, int top, int cx1) {
     }
     draw_toggle(cx1 - dpx(18), y + dpx(32), !S.hidden, H_TOGGLE, T_SHOW);
     y += step;
-    key_hint(sub, L"Hides the pointer and Roblox's built-in gun crosshair", A_CURSOR);
+    key_hint(sub, L"Also hides Roblox's own crosshair", A_CURSOR);
     hit(cx0, y, cx1, y + dpx(64), H_TOGGLE, T_HIDECUR);
     setting_row(cx0, y, cx1, dpx(90), L"Hide mouse cursor", sub, H_TOGGLE, T_HIDECUR);
     draw_toggle(cx1 - dpx(18), y + dpx(32), S.hidecur, H_TOGGLE, T_HIDECUR);
     y += step;
     hit(cx0, y, cx1, y + dpx(64), H_TOGGLE, T_AUTOSTART);
-    setting_row(cx0, y, cx1, dpx(90), L"Start with Windows", L"Starts quietly (no intro, no panel) when you sign in", H_TOGGLE, T_AUTOSTART);
+    setting_row(cx0, y, cx1, dpx(90), L"Start with Windows", L"Runs in the background when you log in", H_TOGGLE, T_AUTOSTART);
     draw_toggle(cx1 - dpx(18), y + dpx(32), autostart_on(), H_TOGGLE, T_AUTOSTART);
     y += step;
     hit(cx0, y, cx1, y + dpx(64), H_TOGGLE, T_OPENSTART);
-    setting_row(cx0, y, cx1, dpx(90), L"Open this panel on startup", L"Turn off to start straight in the game", H_TOGGLE, T_OPENSTART);
+    setting_row(cx0, y, cx1, dpx(90), L"Open this panel on startup", L"Off goes straight to the game", H_TOGGLE, T_OPENSTART);
     draw_toggle(cx1 - dpx(18), y + dpx(32), S.open_start, H_TOGGLE, T_OPENSTART);
     y += step;
     { /* bug reports */
-        const wchar_t *sub3 = webhook_set() ? L"Send app + Roblox crash reports to simplysoul automatically"
-                                            : L"The app keeps a log; save a report file to send to simplysoul";
+        const wchar_t *sub3 = webhook_set() ? L"Sends crash logs to simplysoul"
+                                            : L"Save a report file to send to simplysoul";
         if (webhook_set()) hit(cx0, y, cx1 - dpx(250), y + dpx(64), H_TOGGLE, T_REPORTS);
         setting_row(cx0, y, cx1, dpx(290), L"Bug reports", sub3, webhook_set() ? H_TOGGLE : 0, T_REPORTS);
         int bx1 = webhook_set() ? cx1 - dpx(84) : cx1 - dpx(16);
@@ -8438,7 +8497,7 @@ static void tab_general(int cx0, int top, int cx1) {
     if (stats_target()[0]) { /* opt-in usage stats */
         hit(cx0, y, cx1, y + dpx(64), H_TOGGLE, T_STATS);
         setting_row(cx0, y, cx1, dpx(90), L"Share anonymous usage stats",
-                    L"Once a week: version, Windows, screen, theme & settings. No name, no files.", H_TOGGLE, T_STATS);
+                    L"Weekly, no personal info", H_TOGGLE, T_STATS);
         draw_toggle(cx1 - dpx(18), y + dpx(32), g_stats, H_TOGGLE, T_STATS);
         y += step;
     }
@@ -8471,10 +8530,10 @@ static void tab_updates(int cx0, int top, int cx1, int bottom) {
         wchar_t sub4[160];
         int st = (int)g_upd_state;
         if (!updates_set()) wcscpy(sub4, L"Automatic updates aren't set up in this build");
-        else if (st == UPD_READY) wsprintfW(sub4, L"v%s is downloaded and ready \x2014 restart to update", g_upd_ver);
+        else if (st == UPD_READY) wsprintfW(sub4, L"v%s ready, restart to update", g_upd_ver);
         else if (st == UPD_CHECKING) wcscpy(sub4, L"Checking for updates...");
-        else if (st == UPD_LATEST) wcscpy(sub4, g_is_tester ? L"Q/A tester \x2022 you're on the newest build" : L"You're on the newest version");
-        else wcscpy(sub4, g_autoupd ? L"Updates download and install by themselves" : L"Auto-install off \x2014 you'll be told when there's an update");
+        else if (st == UPD_LATEST) wcscpy(sub4, g_is_tester ? L"Up to date (tester build)" : L"Up to date");
+        else wcscpy(sub4, g_autoupd ? L"Installs updates automatically" : L"Auto-install off");
         if (updates_set()) hit(cx0, y, cx1 - dpx(250), y + dpx(64), H_TOGGLE, T_AUTOUPD);
         setting_row(cx0, y, cx1, dpx(440), L"Crosshair Overlay v" VER_WSTR, sub4, updates_set() ? H_TOGGLE : 0, T_AUTOUPD);
         draw_button(cx1 - dpx(84) - dpx(170) - dpx(150), y + dpx(14), cx1 - dpx(84) - dpx(178), y + dpx(50), L"Copy debug info", H_BUTTON, B_DEBUG, 0);
@@ -8488,7 +8547,7 @@ static void tab_updates(int cx0, int top, int cx1, int bottom) {
     if (g_is_tester) { /* Q/A tester tools */
         y += dpx(72);
         int sent = !wcscmp(g_tester_ok, VER_WSTR);
-        const wchar_t *ts = !g_tbuilds ? L"Test builds paused \x2014 you get the normal releases"
+        const wchar_t *ts = !g_tbuilds ? L"Test builds paused"
                           : sent ? L"Thanks! You said v" VER_WSTR L" looks good"
                                  : L"How's v" VER_WSTR L"? Let simplysoul know";
         p_rrect((float)cx0, (float)y, (float)cx1, (float)(y + dpx(64)), dpf(12), 0, lerpc(C_CARD, C_ACCENT, 0.10f), 1);
@@ -8500,7 +8559,7 @@ static void tab_updates(int cx0, int top, int cx1, int bottom) {
         q_text_ex(cx1 - dpx(78), y + dpx(48), cx1, y + dpx(62), L"TEST BUILDS", F_TINY, C_DIM, DT_CENTER, 0);
     }
     y += dpx(82);
-    q_text_ex(cx0 + dpx(2), y, cx1, y + dpx(20), L"WHAT'S CHANGED", F_TINY, C_DIM, DT_LEFT, 1);
+    q_text_ex(cx0 + dpx(2), y, cx1, y + dpx(20), L"What's changed", F_SMALL, C_DIM, DT_LEFT, 0);
     y += dpx(26);
     /* scrolling list of versions */
     RECT old = g_clip;
@@ -8541,9 +8600,7 @@ static void tab_updates(int cx0, int top, int cx1, int bottom) {
                 if (title[0]) q_text(cx0 + dpx(14) + z.cx, y + dpx(2), lx1 - dpx(150), y + dpx(28), title, F_BOLD, cur ? C_TEXT : C_MUTED, DT_LEFT);
                 if (cur) {
                     int bx1 = lx1 - dpx(10), bx0 = bx1 - dpx(132);
-                    p_rrect((float)bx0, (float)(y + dpx(4)), (float)bx1, (float)(y + dpx(24)), dpf(10), 0, C_ACCENT, 0.16f);
-                    p_rrect((float)bx0, (float)(y + dpx(4)), (float)bx1, (float)(y + dpx(24)), dpf(10), 1, C_ACCENT, 0.8f);
-                    q_text(bx0, y + dpx(4), bx1, y + dpx(24), L"you have v" VER_WSTR, F_SMALL, C_ACCLT, DT_CENTER);
+                    q_text(bx0, y + dpx(4), bx1, y + dpx(24), L"Installed", F_SMALL, C_DIM, DT_RIGHT);
                 }
             }
             y += dpx(30);
@@ -8614,42 +8671,35 @@ static void ui_paint(HWND h) {
     g_nrows = 0;
     { static int lt = -1; if (g_tab != lt) { if (lt >= 0) crumb(L"%s tab", TAB_NAMES[g_tab]); lt = g_tab; } }
     p_fill(0, 0, W, H, C_BG);
-    ui_deco(0, BAR, W, H); /* the theme's background art */
+    ui_deco(0, BAR, W, H); /* the theme's background art, kept faint so it doesn't fight the settings */
+    p_fill_a(0, BAR, W, H, C_BG, 0.72f);
     for (int y = 0; y < HB; y++) p_fill(0, y, W, y + 1, lerpc(g_th.side_top, g_th.side_bot, (float)y / HB));
-    p_glow(dpf(30), dpf(24), dpf(170), g_th.deco == DECO_PATROL ? C_ACC2 : C_ACCENT, 0.16f);
-    for (int y = HB; y < BAR; y++) p_fill(0, y, W, y + 1, lerpc(g_th.side_bot, C_BG, 0.35f + 0.5f * (y - HB) / (float)(BAR - HB)));
-    p_fill(0, HB - 1, W, HB, lerpc(C_BORDER, C_BG, 0.35f));
+    p_fill(0, HB, W, BAR, lerpc(g_th.side_bot, C_BG, 0.5f));
     p_fill(0, BAR - 1, W, BAR, C_BORDER);
     if (g_th.deco == DECO_PATROL) { /* red/blue lightbar */
         p_fill(0, 0, W / 2, dpx(3), C_ACC2);
         p_fill(W / 2, 0, W, dpx(3), C_ACCENT);
-    } else p_rrect(0, 0, (float)W, dpf(2), 0, 0, C_ACCENT, 0.85f);
+    }
 
     /* brand */
     {
         float lx0 = dpf(16), ly0 = (HB - dpf(30)) / 2, L = dpf(30);
-        p_rrect(lx0, ly0, lx0 + L, ly0 + L, dpf(4), 0, C_CARD, 1);
-        p_rrect(lx0, ly0, lx0 + L, ly0 + L, dpf(4), 1, lerpc(C_BORDER, C_ACCENT, 0.5f), 1);
         p_crosshair(lx0 + L / 2, ly0 + L / 2, dpx(28), S.style, S.color, dpx(28) * 0.27f, 2, 1, 1.0f);
-        q_text_ex(dpx(58), dpx(6), W - dpx(260), dpx(29), L"CROSSHAIR OVERLAY", fit_font(mem, L"CROSSHAIR OVERLAY", 1, W - dpx(320), F_HUD, F_TAB, F_HUDS), C_TEXT, DT_LEFT, 1);
-        q_text(dpx(59), dpx(27), dpx(400), dpx(44), L"v" VER_WSTR L"  \x2022  made by simplysoul", F_SMALL, C_MUTED, DT_LEFT);
+        q_text(dpx(56), dpx(7), W - dpx(260), dpx(29), L"Crosshair Overlay", fit_font(mem, L"Crosshair Overlay", 0, W - dpx(320), F_HUD, F_TAB, F_HUDS), C_TEXT, DT_LEFT);
+        q_text(dpx(57), dpx(27), dpx(400), dpx(44), L"v" VER_WSTR L" by simplysoul", F_SMALL, C_DIM, DT_LEFT);
         if (g_is_tester) { /* Q/A badge: a small outlined tag after the title */
-            HFONT tf = fit_font(mem, L"CROSSHAIR OVERLAY", 1, W - dpx(320), F_HUD, F_TAB, F_HUDS);
+            HFONT tf = fit_font(mem, L"Crosshair Overlay", 0, W - dpx(320), F_HUD, F_TAB, F_HUDS);
             SIZE z = {0}, bz = {0};
             HGDIOBJ of = SelectObject(mem, tf);
-            SetTextCharacterExtra(mem, 1);
-            GetTextExtentPoint32W(mem, L"CROSSHAIR OVERLAY", 17, &z);
-            const wchar_t *bt = g_tbuilds ? L"Q/A TESTER" : L"TESTER (PAUSED)";
+            GetTextExtentPoint32W(mem, L"Crosshair Overlay", 17, &z);
+            const wchar_t *bt = g_tbuilds ? L"Tester" : L"Tester (paused)";
             SelectObject(mem, F_TINY);
             GetTextExtentPoint32W(mem, bt, lstrlenW(bt), &bz);
-            SetTextCharacterExtra(mem, 0);
             SelectObject(mem, of);
-            int bh = dpx(18), bx = dpx(58) + z.cx + dpx(14), by = dpx(17) - bh / 2 + dpx(1);
-            int bw = bz.cx + dpx(26);
-            p_rrect((float)bx, (float)by, (float)(bx + bw), (float)(by + bh), (float)bh / 2, 0, C_ACCENT, 0.14f);
-            p_rrect((float)bx, (float)by, (float)(bx + bw), (float)(by + bh), (float)bh / 2, 1, C_ACCENT, 0.85f);
-            p_circle((float)(bx + dpx(9)), (float)by + bh / 2.0f, dpf(2.6f), 0, C_ACCENT, 1);
-            q_text_ex(bx + dpx(15), by, bx + bw - dpx(4), by + bh, bt, F_TINY, C_ACCLT, DT_LEFT, 1);
+            int bh = dpx(18), bx = dpx(56) + z.cx + dpx(10), by = dpx(18) - bh / 2;
+            int bw = bz.cx + dpx(14);
+            p_rrect((float)bx, (float)by, (float)(bx + bw), (float)(by + bh), dpf(4), 1, lerpc(C_BORDER, C_TEXT, 0.25f), 1);
+            q_text(bx, by, bx + bw, by + bh, bt, F_TINY, C_MUTED, DT_CENTER);
         }
     }
     { /* search field */
@@ -8678,26 +8728,22 @@ static void ui_paint(HWND h) {
     { /* close + panel size buttons */
         int bs = dpx(28), by0 = (HB - bs) / 2;
         int x1 = W - dpx(14), x0 = x1 - bs, hv = hov(H_CLOSE, 0);
-        if (hv) glow_box((float)x0, (float)by0, (float)x1, (float)(by0 + bs), 0.2f);
-        p_rrect((float)x0, (float)by0, (float)x1, (float)(by0 + bs), dpf(4), 0, hv ? C_ACCENT : C_CARD, 1);
-        p_rrect((float)x0, (float)by0, (float)x1, (float)(by0 + bs), dpf(4), 1, hv ? C_ACCENT : C_BORDER, 1);
+        if (hv) p_rrect((float)x0, (float)by0, (float)x1, (float)(by0 + bs), dpf(6), 0, RGB(196, 43, 28), 1);
         float bx = (x0 + x1) / 2.0f, byc = by0 + bs / 2.0f, s5 = dpf(5);
-        p_line(bx - s5, byc - s5, bx + s5, byc + s5, dpf(1.7f), hv ? C_ONACC : C_TEXT, 1);
-        p_line(bx - s5, byc + s5, bx + s5, byc - s5, dpf(1.7f), hv ? C_ONACC : C_TEXT, 1);
+        p_line(bx - s5, byc - s5, bx + s5, byc + s5, dpf(1.5f), hv ? C_WHITE : C_MUTED, 1);
+        p_line(bx - s5, byc + s5, bx + s5, byc - s5, dpf(1.5f), hv ? C_WHITE : C_MUTED, 1);
         hit(x0, by0, x1, by0 + bs, H_CLOSE, 0);
         for (int k = 1; k >= 0; k--) { /* panel size: smaller / bigger */
             x1 = x0 - dpx(k ? 14 : 6);
             x0 = x1 - bs;
             int can = k ? g_ui_size < 3 : g_ui_size > 0, hv2 = hov(H_SIZE, k ? 1 : -1);
-            p_rrect((float)x0, (float)by0, (float)x1, (float)(by0 + bs), dpf(4), 0, hv2 && can ? C_HOVER : C_CARD, can ? 1.0f : 0.5f);
-            p_rrect((float)x0, (float)by0, (float)x1, (float)(by0 + bs), dpf(4), 1, C_BORDER, 1);
+            if (hv2 && can) p_rrect((float)x0, (float)by0, (float)x1, (float)(by0 + bs), dpf(6), 0, C_HOVER, 1);
             COLORREF ic = can ? C_TEXT : C_DIM;
             float sx = (x0 + x1) / 2.0f;
             p_line(sx - dpf(5), byc, sx + dpf(5), byc, dpf(1.6f), ic, 1);
             if (k) p_line(sx, byc - dpf(5), sx, byc + dpf(5), dpf(1.6f), ic, 1);
             hit(x0, by0, x1, by0 + bs, H_SIZE, k ? 1 : -1);
         }
-        q_text_ex(x0 - dpx(110), by0, x0 - dpx(10), by0 + bs, L"PANEL SIZE", F_TINY, C_MUTED, DT_RIGHT, 1);
     }
 
     /* tab bar */
@@ -8712,15 +8758,13 @@ static void ui_paint(HWND h) {
             int x0 = tx0 + t * tw, x1 = x0 + tw, sel = t == g_tab, hv = hov(H_TAB, t);
             const wchar_t *up = TAB_SHORT[t];
             if (sel) {
-                for (int y = HB; y < BAR - 1; y++)
-                    for (int x = x0; x < x1; x++) blend(x, y, C_ACCENT, 0.20f * (y - HB) / (float)(BAR - HB));
-                p_rrect((float)x0 + dpf(6), (float)(BAR - dpx(7)), (float)x1 - dpf(6), (float)(BAR + dpx(1)), dpf(4), 0, C_ACCENT, 0.25f);
-                p_rrect((float)x0 + dpf(4), (float)(BAR - dpx(3)), (float)x1 - dpf(4), (float)BAR, 0, 0, C_ACCENT, 1);
-            } else if (hv) {
-                p_rrect((float)x0 + dpf(2), (float)HB + dpf(5), (float)x1 - dpf(2), (float)BAR - dpf(5), dpf(3), 0, C_HOVER, 0.8f);
-                p_rrect((float)x0 + dpf(14), (float)(BAR - dpx(2)), (float)x1 - dpf(14), (float)BAR, 0, 0, C_ACCENT, 0.5f);
+                SIZE z = {0};
+                HGDIOBJ of = SelectObject(mem, tf);
+                GetTextExtentPoint32W(mem, up, lstrlenW(up), &z);
+                SelectObject(mem, of);
+                int m = (x0 + x1) / 2;
+                p_fill(m - z.cx / 2, BAR - dpx(2), m + z.cx / 2 + 1, BAR, C_ACCENT);
             }
-            if (t) p_fill(x0, HB + dpx(13), x0 + 1, BAR - dpx(13), lerpc(C_BORDER, C_BG, 0.2f));
             q_text(x0, HB, x1, BAR - dpx(1), up, tf, sel ? C_TEXT : hv ? lerpc(C_MUTED, C_TEXT, 0.6f) : C_MUTED, DT_CENTER);
             hit(x0, HB, x1, BAR, H_TAB, t);
         }
@@ -8731,11 +8775,8 @@ static void ui_paint(HWND h) {
         int x0 = dpx(16), x1 = SW + dpx(6);
         draw_preview(x0, BAR + dpx(18), x1, H - dpx(234));
         int y0 = H - dpx(196), y1 = H - dpx(110);
-        p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(8), 0, C_CARD, 1);
-        p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(8), 1, C_BORDER, 1);
-        p_rrect((float)x0, (float)(y0 + dpx(14)), (float)(x0 + dpx(3)), (float)(y1 - dpx(14)), 0, 0, C_ACCENT, 1);
-        int tx = x0 + dpx(16);
-        q_text_ex(tx, y0 + dpx(10), x1 - dpx(8), y0 + dpx(26), L"NOW USING", F_TINY, C_DIM, DT_LEFT, 1);
+        int tx = x0 + dpx(2);
+        q_text(tx, y0 + dpx(10), x1 - dpx(8), y0 + dpx(26), L"Current", F_SMALL, C_DIM, DT_LEFT);
         wchar_t upb[96];
         if (S.l2_style >= 0) wsprintfW(upb, L"%s + %s", STYLE_NAMES[S.style], STYLE_NAMES[S.l2_style]);
         else lstrcpynW(upb, STYLE_NAMES[S.style], 96);
@@ -8743,15 +8784,14 @@ static void ui_paint(HWND h) {
         q_text(tx, y0 + dpx(25), x1 - dpx(8), y0 + dpx(50), up, fit_font(mem, up, 0, x1 - tx - dpx(10), F_HUD, F_TITLE, F_BOLD), C_TEXT, DT_LEFT);
         p_rrect((float)tx, (float)(y0 + dpx(58)), (float)(tx + dpx(10)), (float)(y0 + dpx(68)), dpf(2), 0, RGB(COLORS[S.color].r, COLORS[S.color].g, COLORS[S.color].b), 1);
         wchar_t sz[64];
-        wsprintfW(sz, L"%s  \x2022  %d px", COLORS[S.color].name, SIZES[S.size]);
+        wsprintfW(sz, L"%s, %d px", COLORS[S.color].name, SIZES[S.size]);
         q_text(tx + dpx(16), y0 + dpx(53), x1 - dpx(8), y0 + dpx(73), sz, F_SMALL, C_MUTED, DT_LEFT);
     }
     {
         int x0 = dpx(16), x1 = SW + dpx(6), y0 = H - dpx(66), y1 = H - dpx(20);
         int hv = hov(H_DONE, 0);
-        glow_box((float)x0, (float)y0, (float)x1, (float)y1, hv ? 0.30f : 0.16f);
         p_rrect((float)x0, (float)y0, (float)x1, (float)y1, dpf(6), 0, hv ? C_ACCHI : C_ACCENT, 1);
-        const wchar_t *dt = L"Done  \x2014  start playing";
+        const wchar_t *dt = L"Done";
         q_text(x0, y0, x1, y1, dt, fit_font(mem, dt, 0, x1 - x0 - dpx(16), F_BOLD, F_SMALL, F_XS), C_ONACC, DT_CENTER);
         hit(x0, y0, x1, y1, H_DONE, 0);
     }
@@ -8765,11 +8805,8 @@ static void ui_paint(HWND h) {
         HGDIOBJ of = SelectObject(mem, F_HUD);
         GetTextExtentPoint32W(mem, up, lstrlenW(up), &ts);
         SelectObject(mem, of);
-        p_rrect((float)cx0, (float)(hy0 + dpx(6)), (float)(cx0 + dpx(4)), (float)(hy1 - dpx(6)), dpf(2), 0, C_ACCENT, 1);
-        q_text(cx0 + dpx(14), hy0, cx0 + dpx(14) + ts.cx + dpx(8), hy1, up, F_HUD, C_TEXT, DT_LEFT);
-        int lay = g_tab == TAB_CROSSHAIR || g_tab == TAB_COLOR || g_tab == TAB_LOOK, sx1 = lay || g_tab == TAB_PROFILES ? cx1 - dpx(216) : cx1;
-        q_text(cx0 + dpx(14) + ts.cx + dpx(16), hy0 + dpx(2), sx1, hy1, TAB_SUBS[g_tab],
-               fitf(TAB_SUBS[g_tab], sx1 - (cx0 + dpx(14) + ts.cx + dpx(16)), F_SMALL, F_XS, F_XS), C_MUTED, DT_LEFT);
+        q_text(cx0, hy0, cx0 + ts.cx + dpx(8), hy1, up, F_HUD, C_TEXT, DT_LEFT);
+        int lay = g_tab == TAB_CROSSHAIR || g_tab == TAB_COLOR || g_tab == TAB_LOOK;
         if (g_tab == TAB_PROFILES) { /* back up / restore everything */
             draw_button(cx1 - dpx(208), hy0, cx1 - dpx(108), hy1, L"Export...", H_BUTTON, B_EXPORT, 0);
             draw_button(cx1 - dpx(100), hy0, cx1, hy1, L"Import...", H_BUTTON, B_IMPORT, 0);
@@ -8780,8 +8817,6 @@ static void ui_paint(HWND h) {
             if (g_edit_l2 && S.l2_style < 0) p_circle((float)(cx1 - dpx(12)), (float)(hy0 + dpx(6)), dpf(4), 0, C_WARN, 1);
         }
         p_fill(cx0, hy1 + dpx(8), cx1, hy1 + dpx(9), lerpc(C_BORDER, C_BG, 0.2f));
-        p_rrect((float)cx0, (float)(hy1 + dpx(7)), (float)(cx0 + dpx(56)), (float)(hy1 + dpx(10)), 0, 0, C_ACCENT, 1);
-        p_rrect((float)(cx0 + dpx(60)), (float)(hy1 + dpx(7)), (float)(cx0 + dpx(68)), (float)(hy1 + dpx(10)), 0, 0, C_ACCENT, 0.5f);
     }
 
     int top = BAR + dpx(64);
@@ -8797,15 +8832,24 @@ static void ui_paint(HWND h) {
     case TAB_GENERAL: tab_general(cx0, top, cx1); break;
     case TAB_UPDATES: tab_updates(cx0, top, cx1, H - dpx(124)); break;
     }
-    if (g_ui_status[0]) {
+    if (SAFE_UNSAVED() && !g_ui_status[0]) {
+        int y0 = H - dpx(58), y1 = H - dpx(14);
+        p_rrect((float)cx0, (float)y0, (float)cx1, (float)y1, dpf(8), 0, lerpc(C_CARD, C_WARN, 0.12f), 1);
+        p_rrect((float)cx0, (float)y0, (float)cx1, (float)y1, dpf(8), 1, lerpc(C_BORDER, C_WARN, 0.5f), 1);
+        q_text(cx0 + dpx(16), y0, cx1 - dpx(330), y1, L"Safe mode: your settings aren't loaded.",
+               fitf(L"Safe mode: your settings aren't loaded.", cx1 - dpx(330) - cx0 - dpx(16), F_BOLD, F_SMALL, F_XS),
+               theme_is_light() ? RGB(150, 90, 0) : C_WARN, DT_LEFT);
+        draw_button(cx1 - dpx(318), y0 + dpx(7), cx1 - dpx(172), y1 - dpx(7), L"Restart normally", H_SAFE, 1, 0);
+        draw_button(cx1 - dpx(164), y0 + dpx(7), cx1 - dpx(8), y1 - dpx(7), L"Keep these", H_SAFE, 2, 0);
+    } else if (g_ui_status[0]) {
         p_rrect((float)cx0, (float)(H - dpx(52)), (float)cx1, (float)(H - dpx(16)), dpf(10), 0, lerpc(C_CARD, C_WARN, 0.14f), 1);
         q_text(cx0 + dpx(14), H - dpx(52), cx1 - dpx(14), H - dpx(16), g_ui_status, F_SMALL,
                theme_is_light() ? RGB(150, 90, 0) : C_WARN, DT_LEFT);
     } else if (g_news_hash && g_news_hash != g_news_dismissed && g_news[0]) { /* the developer's announcement */
         int y0 = H - dpx(58), y1 = H - dpx(14);
-        p_rrect((float)cx0, (float)y0, (float)cx1, (float)y1, dpf(10), 0, lerpc(C_CARD, C_ACCENT, 0.16f), 1);
-        p_rrect((float)cx0, (float)y0, (float)(cx0 + dpx(4)), (float)y1, dpf(2), 0, C_ACCENT, 1);
-        q_text_ex(cx0 + dpx(16), y0, cx0 + dpx(112), y1, L"NEWS", F_TAB, C_ACCLT, DT_LEFT, 1);
+        p_rrect((float)cx0, (float)y0, (float)cx1, (float)y1, dpf(8), 0, C_CARD, 1);
+        p_rrect((float)cx0, (float)y0, (float)cx1, (float)y1, dpf(8), 1, C_BORDER, 1);
+        q_text(cx0 + dpx(16), y0, cx0 + dpx(112), y1, L"News", F_BOLD, C_ACCLT, DT_LEFT);
         {
             int mw = cx1 - dpx(44) - (cx0 + dpx(70));
             HFONT nf = fit_font(mem, g_news, 0, mw, F_SMALL, F_XS, F_XS);
@@ -8862,8 +8906,7 @@ static void ui_paint(HWND h) {
             if (y0 + th > H - dpx(8)) y0 = g_tip_pt.y - th - dpx(12);
             p_rrect((float)x0 + dpf(3), (float)y0 + dpf(4), (float)(x0 + tw) + dpf(3), (float)(y0 + th) + dpf(4), dpf(8), 0, RGB(0, 0, 0), 0.35f);
             p_rrect((float)x0, (float)y0, (float)(x0 + tw), (float)(y0 + th), dpf(8), 0, lerpc(C_CARD, C_BG, 0.25f), 1);
-            p_rrect((float)x0, (float)y0, (float)(x0 + tw), (float)(y0 + th), dpf(8), 1, lerpc(C_BORDER, C_ACCENT, 0.5f), 1);
-            p_rrect((float)x0, (float)y0 + dpf(8), (float)x0 + dpf(3), (float)(y0 + th) - dpf(8), 0, 0, C_ACCENT, 1);
+            p_rrect((float)x0, (float)y0, (float)(x0 + tw), (float)(y0 + th), dpf(6), 1, C_BORDER, 1);
             q_text(x0 + dpx(12), y0 + dpx(10), x0 + dpx(12) + cr.right, y0 + th - dpx(6), tp, F_SMALL, C_TEXT, DT_LEFT | DT_WORDBREAK);
         }
     }
@@ -8873,7 +8916,7 @@ static void ui_paint(HWND h) {
         int n = g_nsres ? g_nsres : 1, ph = n * rh + dpx(12);
         p_rrect((float)rx0 + dpf(3), (float)ry + dpf(5), (float)rx1 + dpf(3), (float)(ry + ph) + dpf(5), dpf(10), 0, RGB(0, 0, 0), 0.4f);
         p_rrect((float)rx0, (float)ry, (float)rx1, (float)(ry + ph), dpf(10), 0, lerpc(C_CARD, C_BG, 0.2f), 1);
-        p_rrect((float)rx0, (float)ry, (float)rx1, (float)(ry + ph), dpf(10), 1, lerpc(C_BORDER, C_ACCENT, 0.4f), 1);
+        p_rrect((float)rx0, (float)ry, (float)rx1, (float)(ry + ph), dpf(10), 1, C_BORDER, 1);
         hit(rx0, ry, rx1, ry + ph, H_SEARCHRES, -1);
         if (!g_nsres) q_text(rx0 + dpx(16), ry + dpx(6), rx1 - dpx(10), ry + dpx(6) + rh, L"No settings match. Try \"fps\", \"color\" or \"hide\".", F_SMALL, C_MUTED, DT_LEFT);
         for (int i = 0; i < g_nsres; i++) {
@@ -8881,7 +8924,6 @@ static void ui_paint(HWND h) {
             int y0 = ry + dpx(6) + i * rh, sel = i == g_search_sel || hov(H_SEARCHRES, i);
             if (sel) {
                 p_rrect((float)(rx0 + dpx(6)), (float)y0, (float)(rx1 - dpx(6)), (float)(y0 + rh), dpf(7), 0, C_HOVER, 1);
-                p_rrect((float)(rx0 + dpx(6)), (float)(y0 + dpx(9)), (float)(rx0 + dpx(9)), (float)(y0 + rh - dpx(9)), 0, 0, C_ACCENT, 1);
             }
             q_text(rx0 + dpx(18), y0, rx1 - dpx(110), y0 + rh, it->title, fitf(it->title, rx1 - rx0 - dpx(130), F_BOLD, F_SMALL, F_XS), C_TEXT, DT_LEFT);
             q_text(rx1 - dpx(108), y0, rx1 - dpx(16), y0 + rh, it->tab >= 0 ? TAB_SHORT[it->tab] : it->tab == -2 ? L"Opens a window" : L"Top bar", F_SMALL, sel ? C_ACCLT : C_DIM, DT_RIGHT);
@@ -8912,8 +8954,6 @@ static void ui_paint(HWND h) {
         p_rrect(0, (float)t.top, (float)t.left, (float)t.bottom, 0, 0, dim, 0.62f);
         p_rrect((float)t.right, (float)t.top, (float)W, (float)t.bottom, 0, 0, dim, 0.62f);
         /* outline + outer glow only, so the spotlighted part stays clear */
-        p_rrect((float)t.left - dpf(6), (float)t.top - dpf(6), (float)t.right + dpf(6), (float)t.bottom + dpf(6), dpf(14), dpf(5), C_ACCENT, 0.12f);
-        p_rrect((float)t.left - dpf(3), (float)t.top - dpf(3), (float)t.right + dpf(3), (float)t.bottom + dpf(3), dpf(12), dpf(3), C_ACCENT, 0.25f);
         p_rrect((float)t.left, (float)t.top, (float)t.right, (float)t.bottom, dpf(10), dpf(2), C_ACCENT, 1);
         int cw = dpx(330), ch = dpx(178), kx, ky;
         if (g_tour == 1) { kx = t.right - cw; ky = t.bottom + dpx(16); }
@@ -8925,8 +8965,8 @@ static void ui_paint(HWND h) {
         p_rrect((float)kx, (float)ky, (float)(kx + cw), (float)(ky + ch), dpf(12), 0, C_CARD, 1);
         p_rrect((float)kx, (float)ky, (float)(kx + cw), (float)(ky + ch), dpf(12), 1, C_ACCENT, 1);
         wchar_t stp[24];
-        wsprintfW(stp, L"STEP %d OF 3", g_tour);
-        q_text_ex(kx + dpx(18), ky + dpx(14), kx + cw - dpx(18), ky + dpx(30), stp, F_TINY, C_ACCLT, DT_LEFT, 1);
+        wsprintfW(stp, L"%d of 3", g_tour);
+        q_text(kx + dpx(18), ky + dpx(14), kx + cw - dpx(18), ky + dpx(30), stp, F_SMALL, C_DIM, DT_LEFT);
         for (int i = 0; i < 3; i++) p_circle((float)(kx + cw - dpx(46) + i * dpx(12)), (float)(ky + dpx(22)), dpf(3.2f), 0, i < g_tour ? C_ACCENT : C_TRACK, 1);
         q_text(kx + dpx(18), ky + dpx(32), kx + cw - dpx(18), ky + dpx(60), tt, F_HUD, C_TEXT, DT_LEFT);
         q_text(kx + dpx(18), ky + dpx(64), kx + cw - dpx(28), ky + dpx(122), tx, F_SMALL, C_MUTED, DT_LEFT | DT_WORDBREAK);
@@ -8993,7 +9033,7 @@ static void uninstall_all(void) {
         wsprintfW(args, L"/select,\"%s\"", self);
         ShellExecuteW(NULL, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
     }
-    if (!g_test_yes) MessageBoxW(NULL, L"Done \x2014 everything is put back. Delete the Crosshair Overlay exe (it's selected in the window that opened) to finish.",
+    if (!g_test_yes) MessageBoxW(NULL, L"Everything is put back. Delete the Crosshair Overlay exe (it's selected in the window that opened) to finish.",
                 L"Remove everything", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
     if (g_keydlg) DestroyWindow(g_keydlg);
     g_exit_why = L"Remove everything";
@@ -9086,6 +9126,34 @@ static void ui_click(HWND h, int x, int y) {
         recent_remove(v);
         ui_redraw();
         return;
+    case H_SAFE:
+        if (v == 1) { restart_self(0); return; }
+        if (v == 2) { /* keep the defaults: back up the old file, then save normally from now on */
+            wchar_t bak[MAX_PATH + 40];
+            lstrcpynW(bak, g_ini, MAX_PATH);
+            wchar_t *sl = wcsrchr(bak, L'\\');
+            if (sl) wcscpy(sl + 1, L"settings-before-safe-mode.ini");
+            CopyFileW(g_ini, bak, FALSE);
+            g_safe_keep = 1;
+            save_settings();
+            save_binds();
+            log_info(L"safe mode: kept the defaults (old settings in settings-before-safe-mode.ini)");
+            ui_set_status(L"Saved. Your old settings are backed up as settings-before-safe-mode.ini.");
+        }
+        ui_redraw();
+        return;
+    case H_CB:
+        g_cb = clampi(v, 0, 3);
+        if (g_cb) { /* jump to a color that's easy to see for that kind of colorblindness, with the dark edge */
+            static const int PICK[] = {0, 3 /* Yellow */, 0 /* Red */, 5 /* White */};
+            if (g_edit_l2) S.l2_color = PICK[g_cb]; else S.color = PICK[g_cb];
+            S.outline = 1;
+            redraw_overlay();
+        }
+        crumb(L"colorblind mode %d", g_cb);
+        save_settings();
+        ui_redraw();
+        return;
     case H_NEWSX:
         g_news_dismissed = g_news_hash;
         save_settings();
@@ -9132,7 +9200,7 @@ static void ui_click(HWND h, int x, int y) {
         break;
     case H_LAYERSEL:
         g_edit_l2 = v;
-        if (v && S.l2_style < 0 && g_tab == TAB_CROSSHAIR) ui_set_status(L"Pick a shape for layer 2 \x2014 it's drawn on top of your main crosshair.");
+        if (v && S.l2_style < 0 && g_tab == TAB_CROSSHAIR) ui_set_status(L"Pick a shape for layer 2. It draws on top of your main crosshair.");
         else if (v && S.l2_style < 0) ui_set_status(L"Pick a shape for layer 2 on the Crosshair tab first.");
         ui_redraw();
         break;
@@ -9181,7 +9249,7 @@ static void ui_click(HWND h, int x, int y) {
             save_settings();
             if (!capture_hide_apply() && g_nocap)
                 ui_set_status(L"Your Windows is too old to hide windows from recordings (needs Windows 10 version 2004 or newer).");
-            else ui_set_status(g_nocap ? L"Crosshair hidden from recordings, streams and screenshots \x2014 you still see it."
+            else ui_set_status(g_nocap ? L"Hidden from recordings. You can still see it."
                                        : L"Crosshair will now show up in recordings, streams and screenshots.");
         }
         else if (v == T_CLICK) { S.click_fx = !S.click_fx; apply(); if (S.click_fx) kick(); }
@@ -9239,7 +9307,7 @@ static void ui_click(HWND h, int x, int y) {
             else if (r == FPS_FAIL)
                 ui_set_status(L"Boost removed, but Roblox's frame-rate setting couldn't be reset. Try Run as administrator.");
             else
-                ui_set_status(L"All FPS changes undone \x2014 Roblox is back to its normal settings. Start Roblox again.");
+                ui_set_status(L"FPS changes undone. Restart Roblox.");
         }
         else { int r = fps_apply(1); perf_sync_installs(); perf_report(r); }
         break;
@@ -9538,6 +9606,7 @@ static void ui_dwm(HWND h) {
 }
 
 static void ui_open(int tab) {
+    if (g_news_wake) SetEvent(g_news_wake); /* look for a new announcement now */
     static int first = 1;
     if (first) { first = 0; g_tab = g_last_tab; } /* the tab you used last time */
     if (tab >= 0) g_tab = tab;
@@ -9719,9 +9788,9 @@ static void card_draw(void) {
     text_at(mem, line, pad, y + dpx(8), W - pad, y + dpx(30), DT_LEFT);
     if (KB[A_SHOWKEYS].vk) {
         key_text(KB[A_SHOWKEYS], k);
-        wsprintfW(line, L"Hides by itself  \x2022  %s to close  \x2022  change keys in settings", k);
+        wsprintfW(line, L"Hides by itself. %s to close.", k);
     } else
-        wcscpy(line, L"Hides by itself  \x2022  change keys in settings");
+        wcscpy(line, L"Hides by itself. Change keys in settings.");
     SetTextColor(mem, C_DIM);
     text_at(mem, line, pad, y + dpx(30), W - pad, y + dpx(52), DT_LEFT);
     SelectObject(mem, oldf);
@@ -9804,7 +9873,17 @@ static LRESULT CALLBACK card_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 
 /* ---------------- tray menu (kept short; everything else is in the settings window) ---------------- */
-enum { ID_OPEN = 1000, ID_SHOWKEYS, ID_HIDE, ID_ABOUT, ID_EXIT, ID_REPORT, ID_PUBLISH, ID_UPDATE, ID_RBXTIPS, ID_TESTERID, ID_COPYCODE };
+/* Start a fresh copy (in safe mode or normally) and close this one. */
+static void restart_self(int safe) {
+    wchar_t self[MAX_PATH], args[64];
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    wsprintfW(args, L"%s--wait %lu", safe ? L"--safe " : L"", GetCurrentProcessId());
+    log_info(L"restarting %s", safe ? L"in safe mode" : L"normally");
+    if ((INT_PTR)ShellExecuteW(NULL, L"open", self, args, NULL, SW_SHOWNORMAL) <= 32) { ui_set_status(L"Couldn't restart. Close the app and open it again."); return; }
+    g_exit_why = safe ? L"restart in safe mode" : L"restart normally";
+    DestroyWindow(g_host);
+}
+enum { ID_OPEN = 1000, ID_SHOWKEYS, ID_HIDE, ID_ABOUT, ID_EXIT, ID_REPORT, ID_PUBLISH, ID_UPDATE, ID_RBXTIPS, ID_TESTERID, ID_COPYCODE, ID_SAFE };
 
 static void show_menu(void) {
     HMENU m = CreatePopupMenu();
@@ -9822,6 +9901,7 @@ static void show_menu(void) {
     AppendMenuW(m, MF_STRING, ID_COPYCODE, L"Copy crosshair code");
     if (updates_set()) AppendMenuW(m, MF_STRING, ID_TESTERID, g_is_tester ? L"Copy my tester ID (you're a tester)" : L"Copy my tester ID");
     if (g_upd_state == UPD_READY) { wsprintfW(buf, L"Restart to update to v%s", g_upd_ver); AppendMenuW(m, MF_STRING, ID_UPDATE, buf); }
+    AppendMenuW(m, MF_STRING, ID_SAFE, g_safe ? L"Restart normally" : L"Restart in safe mode");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     with_key(buf, L"Exit", A_QUIT);
     AppendMenuW(m, MF_STRING, ID_EXIT, buf);
@@ -9844,6 +9924,11 @@ static void show_menu(void) {
     case ID_SHOWKEYS: card_toggle(); break;
     case ID_HIDE: set_hidden(!S.hidden); break;
     case ID_EXIT: g_exit_why = L"tray menu Exit"; DestroyWindow(g_host); return;
+    case ID_SAFE:
+        if (g_safe) { restart_self(0); return; }
+        if (MessageBoxW(NULL, L"Restart in safe mode?\n\nYour settings and keybinds start at the defaults until you restart normally. Nothing is deleted.",
+                        L"Crosshair Overlay", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) == IDYES) restart_self(1);
+        return;
     case ID_REPORT: report_dialog(-1); return;
     case ID_RBXTIPS: rbx_crash_details(); return;
     case ID_COPYCODE: {
@@ -10182,7 +10267,7 @@ static LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_keydlg && g_tab == TAB_COLOR) ui_redraw();
         return 0;
     case WM_TESTER_OK:
-        if (wp) { lstrcpynW(g_tester_ok, VER_WSTR, 24); save_settings(); ui_set_status(L"Sent to simplysoul \x2014 thanks for testing!"); }
+        if (wp) { lstrcpynW(g_tester_ok, VER_WSTR, 24); save_settings(); ui_set_status(L"Sent. Thanks for testing!"); }
         else ui_set_status(L"Couldn't send it (no internet?). Try again in a bit.");
         ui_redraw();
         return 0;
@@ -10190,6 +10275,7 @@ static LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_news_hash && g_news_hash != g_news_seen) { /* new announcement: a popup once */
             g_news_seen = g_news_hash;
             save_settings();
+            if (g_keydlg) { ui_redraw(); return 0; } /* the panel is open: it shows up at the bottom right away, no popup needed */
             g_nid.uFlags = NIF_INFO;
             wcscpy(g_nid.szInfoTitle, L"Announcement from simplysoul");
             lstrcpynW(g_nid.szInfo, g_news, 256);
@@ -10204,7 +10290,7 @@ static LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_REPORT_DONE:
         if (lp && g_keydlg) {
             wchar_t m2[160];
-            wsprintfW(m2, L"Report sent \x2014 thanks! Your reference: %s (quote it if you talk to simplysoul).", g_last_ref);
+            wsprintfW(m2, L"Report sent, thanks. Reference: %s", g_last_ref);
             ui_set_status(wp ? m2 : L"Couldn't send the report (no internet?). Try again in a bit.");
         }
         else if (lp) { /* sent from the tray: say so with a balloon */
@@ -10263,7 +10349,22 @@ static LRESULT CALLBACK fake_rbx_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 #endif
+static void startup_step_run(int i);
 static void startup_step(int i) {
+    LARGE_INTEGER f, a, b;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    startup_step_run(i);
+    QueryPerformanceCounter(&b);
+    g_steps_ms += (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
+}
+static double qpc_ms(void) {
+    LARGE_INTEGER f, a;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    return (double)a.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+static void startup_step_run(int i) {
     switch (i) {
     case 0:
         load_settings();
@@ -11365,6 +11466,26 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     return publisher_main();
 #endif
     if (run_watchdog_if_asked()) return 0;
+    double load_ms = 0; /* Windows starting the process, up to here */
+    {
+        FILETIME cr, ex, k, u, now;
+        GetSystemTimeAsFileTime(&now);
+        if (GetProcessTimes(GetCurrentProcess(), &cr, &ex, &k, &u)) {
+            ULONGLONG a = ((ULONGLONG)cr.dwHighDateTime << 32) | cr.dwLowDateTime, b = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+            if (b > a && b - a < 600000000ull) load_ms = (double)(b - a) / 10000.0;
+        }
+    }
+    int safe_ask = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    {   /* "--wait <pid>": started by "Restart" in this app, let the old copy close first */
+        int argc = 0;
+        LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        for (int i = 1; argv && i + 1 < argc; i++)
+            if (!wcscmp(argv[i], L"--wait")) {
+                HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)wcstoul(argv[i + 1], NULL, 10));
+                if (p) { WaitForSingleObject(p, 10000); CloseHandle(p); }
+            }
+        if (argv) LocalFree(argv);
+    }
     DWORD updated_from = update_wait_old(); /* started by an update: let the old copy close first */
     HANDLE mtx = CreateMutexW(NULL, TRUE, MUTEX_NAME);
     if (GetLastError() == ERROR_ALREADY_EXISTS && !take_over_older()) { /* an older copy is closed and replaced */
@@ -11372,6 +11493,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
                     L"Crosshair Overlay", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
+    if (has_arg(L"--safe")) g_safe = 1;
+    else if (safe_ask && !updated_from && !has_arg(L"--autostart"))
+        g_safe = MessageBoxW(NULL, L"Start in safe mode?\n\nYour crosshair, keybinds and settings start at the defaults this time, "
+                                   L"so a broken setting can't get in the way. Nothing is deleted: restart normally and it's all back.",
+                             L"Crosshair Overlay", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES;
+    double t0 = qpc_ms(); /* the rest of the startup, without the time spent on that question */
     start_watchdog();
     set_dpi_aware();
     /* Give Roblox priority over this app for CPU time */
@@ -11386,7 +11513,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     {
         wchar_t wv[96];
         win_version(wv);
-        log_info(L"start v" VER_WSTR L" on %s, %dx%d", wv, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        log_info(L"start v" VER_WSTR L" on %s, %dx%d%s", wv, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), g_safe ? L" (SAFE MODE)" : L"");
     }
     if (update_startup_checks(updated_from)) { /* the new version is broken: the previous one is starting */
         restore_cursor();
@@ -11457,13 +11584,25 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
 #endif
     g_autostarted = has_arg(L"--autostart");
     if (autostart_on()) autostart_set(1); /* keep the entry pointing at this exe (it may have moved) */
-    if (S.splash && !g_autostarted) run_splash(inst); /* no intro when Windows starts it at sign-in */
+    double t1 = qpc_ms();
+    if (S.splash && !g_autostarted && !g_safe) run_splash(inst); /* no intro when Windows starts it at sign-in */
     else for (int i = 0; i < NSTARTUP; i++) startup_step(i);
+    double t2 = qpc_ms();
     SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL, focus_event, 0, 0, WINEVENT_OUTOFCONTEXT);
     SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, NULL, focus_event, 0, 0, WINEVENT_OUTOFCONTEXT);
     focus_check();
     if (!g_focus_hidden && !g_scene_hidden) ShowWindow(g_overlay, SW_SHOWNOACTIVATE);
     InterlockedExchange(&g_force_move, 1);
+    { /* startup time: Windows loading it + our setup + the loading steps (the intro animation itself isn't counted) */
+        double total = load_ms + (t1 - t0) + g_steps_ms + (qpc_ms() - t2);
+        g_start_ms = (int)(total + 0.5);
+        g_start_avg = g_start_avg < 0 ? g_start_ms : (g_start_avg * 3 + g_start_ms) / 4;
+        ini_set(L"startup_ms", g_start_ms);
+        ini_set(L"startup_avg", g_start_avg);
+        log_info(L"started in %d ms (Windows %d, setup %d, loading %d, average %d)%s", g_start_ms, (int)load_ms, (int)(t1 - t0 + qpc_ms() - t2),
+                 (int)g_steps_ms, g_start_avg, g_start_ms > 4000 ? L" - slow" : L"");
+        crumb(L"started in %d ms", g_start_ms);
+    }
     if (first_run) {
         save_settings();
         save_binds();
@@ -11567,6 +11706,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     { wchar_t tb[8]; if (GetEnvironmentVariableW(L"CH_CRASH", tb, 8)) { Sleep(1500); if (tb[0] == L'2') { volatile const char *np = NULL; char d[8]; memcpy(d, (const void *)np, 8); log_info(L"%S", d); } *(volatile int *)0 = 0; } }
 #endif
     SetTimer(g_host, 1, 3000, NULL);
+    g_news_wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+    { HANDLE nt = CreateThread(NULL, 0, news_thread, NULL, 0, NULL); if (nt) { SetThreadPriority(nt, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(nt); } }
     HANDLE wt = CreateThread(NULL, 0, rbx_watch, NULL, 0, NULL);
     { HANDLE ct = CreateThread(NULL, 0, rbx_crash_watch, NULL, 0, NULL); if (ct) { SetThreadPriority(ct, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(ct); } }
     if (wt) SetThreadPriority(wt, THREAD_PRIORITY_BELOW_NORMAL);

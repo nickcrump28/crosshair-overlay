@@ -1,6 +1,13 @@
-v1.18  Faster fixes
-Behind the scenes: simplysoul now sees crashes and reports for each version at a glance, so a bad update gets spotted and fixed sooner
-Nothing changes for you — the crash reports you already send are what it counts
+v1.19  Safe mode & colorblind mode
+Colorblind mode (Color tab): fades colors that are hard to see for red-green, blue-yellow or no color, and switches you to one that stands out
+Safe mode: hold Shift while opening the app (or tray > Restart in safe mode) to start with default settings if something's broken. Nothing is deleted
+Announcements show up live, no restart needed
+Smaller download (about a third smaller)
+The app keeps track of how fast it starts, so slow starts can be fixed
+
+v1.18  Cleaner look
+Simpler, calmer settings panel: less glow, fewer boxes, shorter text
+Bad updates get spotted and fixed faster (simplysoul can see crash counts per version now)
 
 v1.17  Layers & smarter crosshair
 Crosshair layers: stack a second shape on top, with its own color and size (Main / Layer 2 switch)
@@ -13,7 +20,7 @@ Fixed: the crosshair lagged behind the mouse (about 3x faster tracking now)
 
 v1.16  Clearer bug reports
 Crash reports explain in plain words what crashed, why, and what you were doing just before
-Report a problem is quicker: pick what's wrong, how often and what you were doing — typing is optional
+Report a problem is quicker: pick what's wrong, how often and what you were doing. Typing is optional
 Press F1 in the settings panel (or search "report") to report a problem
 You get a reference code after sending a report, to quote if you talk to simplysoul
 Fixed: the crosshair lagged behind / didn't line up with the mouse in 1.16.1 and 1.16.2 (back to how 1.15.1 followed the mouse)

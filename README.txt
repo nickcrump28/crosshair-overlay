@@ -1,5 +1,31 @@
 Crosshair Overlay v1.17.1 - by simplysoul
 
+NEW IN 1.19.0
+  - Colorblind mode (Color tab): Off / Red-green / Blue-yellow / No color. Colors that
+    are hard to see for that type are faded, and picking a mode switches the crosshair
+    to one that stands out (Yellow / Red / White) with the dark edge on.
+  - Safe mode: hold Shift while opening the app and say Yes, or tray menu > Restart in
+    safe mode. Settings and keybinds start at the defaults and nothing is saved over the
+    real ones. A bar at the bottom offers "Restart normally" or "Keep these" (the old
+    settings are backed up as settings-before-safe-mode.ini first).
+  - Live announcements: the app checks news.txt every minute while the panel is open,
+    every 3 minutes otherwise, and right away when you open the panel. New, changed or
+    removed announcements show up without restarting. (Uses the GitHub API at most every
+    2 minutes; in between it reads the raw file with a cache-skipping link.)
+  - Smaller download: about 980 KB -> 650 KB (icon and background images recompressed,
+    the crash symbol table no longer padded to 128 KB). Same code, no packer (packers
+    upset antivirus).
+  - Startup time: logged on every start ("started in 235 ms ..."), shown in Copy debug
+    info, and sent with usage stats. The publisher's Health window has a Startup column
+    per version (orange over 3 s) and says when some PCs start slowly.
+
+NEW IN 1.18.1 - Cleaner look
+  The settings panel was toned down: no glow or neon outlines, no HUD brackets
+  or "LIVE PREVIEW" badge, plain title case instead of spaced-out capitals,
+  settings in a simple list instead of a box per row, quieter buttons, and
+  shorter descriptions (the longer explanations are still in the hover tips).
+  Theme background art is kept but faded behind the settings.
+
 NEW IN 1.18.0 - Publisher: Health (crash dashboard)
   The publisher has a new "Health" button. It reads your bug-report Discord channel
   and shows, for each version: players (from usage stats), crashes, errors, updates

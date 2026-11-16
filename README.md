@@ -5,9 +5,9 @@ A crosshair overlay and FPS booster for Roblox, by simplysoul.
 **[Download the latest version](https://github.com/nickcrump28/crosshair-overlay/releases/latest/download/CrosshairOverlay.exe)**
 (Windows 10 / 11 — just run CrosshairOverlay.exe, it updates itself.)
 
-## What's new in v1.18.0
+## What's new in v1.19.0
 
-- Behind the scenes: simplysoul can now see crashes and reports per version at a glance, so a bad update gets spotted and fixed sooner. Nothing changes on your side.
+- Colorblind mode, safe mode (hold Shift while opening), live announcements, and a smaller download.
 
 Every version's changes: [changelog.txt](changelog.txt) • All downloads: [Releases](https://github.com/nickcrump28/crosshair-overlay/releases)
 
