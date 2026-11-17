@@ -1,3 +1,4 @@
 # Q/A testers: one tester ID per line, a name after it is optional
-852e7b6f
-3d555dca
+t1-9c96344ac37b49ce65b42f4b
+t1-7d34080f6b0b111a1bd6365f
+i1-0fe3c376bedd1481beb00486 2026-11-24  # invite code made 2026-11-17 (works once)
